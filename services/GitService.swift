@@ -419,6 +419,38 @@ actor GitService {
         return list
     }
 
+    /// Query commit ids whose subject or body match a case-insensitive query using git --grep.
+    func searchCommitIds(
+        in repo: Repo,
+        query: String,
+        includeAllBranches: Bool = true,
+        includeRemoteBranches: Bool = true,
+        singleRef: String? = nil
+    ) async -> Set<String> {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return [] }
+        var revArgs: [String] = []
+        if let single = singleRef, !single.isEmpty {
+            revArgs = [single]
+        } else if includeAllBranches {
+            revArgs.append(includeRemoteBranches ? "--all" : "--branches")
+        } else {
+            revArgs.append("HEAD")
+        }
+        var args = [
+            "log",
+            "--no-color",
+            "--regexp-ignore-case",
+            "--grep", q,
+            "--pretty=format:%H",
+            "-n", "10000"
+        ]
+        args += revArgs
+        guard let out = try? await runGit(args, cwd: repo.root), out.exitCode == 0 else { return [] }
+        let lines = out.stdout.split(separator: "\n").map(String.init)
+        return Set(lines)
+    }
+
     /// List branches. Returns short names. Optionally include remote branches.
     func listBranches(in repo: Repo, includeRemoteBranches: Bool = false) async -> [String] {
         // Local branches

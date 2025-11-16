@@ -89,6 +89,8 @@ struct GitChangesPanel: View {
   @State var contentSearchMatches: Set<String> = []
   @State private var contentSearchTask: Task<Void, Never>? = nil
   @State private var contentSearchQueryVersion: UInt64 = 0
+  // Unified header search
+  @State var headerSearchQuery: String = ""
   #if canImport(AppKit)
     @State var previewImage: NSImage? = nil
     @State var previewImageTask: Task<Void, Never>? = nil

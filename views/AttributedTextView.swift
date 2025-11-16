@@ -9,6 +9,7 @@ struct AttributedTextView: NSViewRepresentable {
         var lastWrap: Bool = true
         var lastFontSize: CGFloat = 12
         var textStorage = NSTextStorage()
+        var lastSearchQuery: String = ""
     }
 
     var text: String
@@ -16,6 +17,7 @@ struct AttributedTextView: NSViewRepresentable {
     var wrap: Bool
     var showLineNumbers: Bool
     var fontSize: CGFloat = 12
+    var searchQuery: String = ""
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -72,6 +74,8 @@ struct AttributedTextView: NSViewRepresentable {
         context.coordinator.lastIsDiff = isDiff
         context.coordinator.lastWrap = wrap
         context.coordinator.lastFontSize = fontSize
+        applySearchHighlight(searchQuery, in: tv)
+        context.coordinator.lastSearchQuery = searchQuery
         return scroll
     }
 
@@ -130,6 +134,15 @@ struct AttributedTextView: NSViewRepresentable {
             apply(text: text, isDiff: isDiff, wrap: wrap, tv: tv, storage: context.coordinator.textStorage, coordinator: context.coordinator)
             context.coordinator.lastText = text
             context.coordinator.lastIsDiff = isDiff
+            // Re-apply highlight after content changes
+            applySearchHighlight(searchQuery, in: tv)
+            context.coordinator.lastSearchQuery = searchQuery
+        }
+
+        // Update highlight if query changed
+        if searchQuery != context.coordinator.lastSearchQuery {
+            applySearchHighlight(searchQuery, in: tv)
+            context.coordinator.lastSearchQuery = searchQuery
         }
     }
 
@@ -240,6 +253,35 @@ struct AttributedTextView: NSViewRepresentable {
                 tv.setSelectedRange(NSRange(location: 0, length: 0))
             }
         }
+    }
+}
+
+// MARK: - Search highlight helpers
+private let cmHighlightKey = NSAttributedString.Key("cmHighlight")
+
+private func applySearchHighlight(_ query: String, in tv: NSTextView) {
+    guard let storage = tv.textStorage else { return }
+    let str = storage.string as NSString
+    let fullRange = NSRange(location: 0, length: str.length)
+    // Clear previous highlights (only our custom key)
+    storage.enumerateAttribute(cmHighlightKey, in: fullRange) { value, range, _ in
+        if value != nil {
+            storage.removeAttribute(.backgroundColor, range: range)
+            storage.removeAttribute(cmHighlightKey, range: range)
+        }
+    }
+    let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !q.isEmpty else { return }
+    let options: NSString.CompareOptions = [.caseInsensitive]
+    var searchRange = fullRange
+    let highlight = NSColor.systemYellow.withAlphaComponent(0.35)
+    while searchRange.length > 0 {
+        let r = str.range(of: q, options: options, range: searchRange)
+        if r.location == NSNotFound { break }
+        storage.addAttributes([.backgroundColor: highlight, cmHighlightKey: 1], range: r)
+        let nextLoc = r.location + r.length
+        if nextLoc >= str.length { break }
+        searchRange = NSRange(location: nextLoc, length: str.length - nextLoc)
     }
 }
 

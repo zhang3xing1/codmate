@@ -27,7 +27,7 @@ extension GitChangesPanel {
     var body: some View {
       VStack(spacing: 8) {
         // Controls + full-width commit list (no right-side diff in History mode)
-        // Branch scope controls + search
+        // Branch scope controls (search moved to header)
         HStack(spacing: 10) {
           // Branch selector
           HStack(spacing: 6) {
@@ -68,16 +68,6 @@ extension GitChangesPanel {
               vm.loadCommits()
             }
           Spacer()
-          HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Search commits", text: $vm.searchQuery)
-              .textFieldStyle(.plain)
-              .onChange(of: vm.searchQuery) { _, _ in vm.applyFilter() }
-          }
-          .padding(.vertical, 4)
-          .padding(.horizontal, 6)
-          .background(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
-          .frame(maxWidth: 260)
         }
         .onChange(of: vm.showAllBranches) { _, _ in vm.loadCommits() }
         // Header row (fixed height, fixed column widths)

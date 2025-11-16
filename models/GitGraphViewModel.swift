@@ -84,12 +84,20 @@ final class GitGraphViewModel: ObservableObject {
     func applyFilter() {
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { filteredCommits = commits; return }
-        filteredCommits = commits.filter { c in
+        let basic = commits.filter { c in
             if c.subject.lowercased().contains(q) { return true }
             if c.author.lowercased().contains(q) { return true }
             if c.shortId.lowercased().contains(q) { return true }
             if c.decorations.joined(separator: ",").lowercased().contains(q) { return true }
             return false
+        }
+        // Also include commits whose messages match (subject/body) via git --grep
+        guard let repo else { filteredCommits = basic; return }
+        Task { [weak self] in
+            guard let self else { return }
+            let ids = await self.service.searchCommitIds(in: repo, query: q, includeAllBranches: self.showAllBranches, includeRemoteBranches: self.showRemoteBranches, singleRef: (self.showAllBranches ? nil : (self.selectedBranch?.isEmpty == false ? self.selectedBranch : nil)))
+            let extra = commits.filter { ids.contains($0.id) }
+            await MainActor.run { self.filteredCommits = Array(Set(basic + extra)) }
         }
     }
 

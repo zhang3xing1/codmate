@@ -27,7 +27,8 @@ extension GitChangesPanel {
                     isDiff: isDiff,
                     wrap: wrapText,
                     showLineNumbers: showLineNumbers,
-                    fontSize: 12
+                    fontSize: 12,
+                    searchQuery: (mode == .diff || mode == .browser) ? headerSearchQuery : ""
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }

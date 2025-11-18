@@ -11,6 +11,7 @@ struct ProjectsListView: View {
   @State private var pendingDelete: Project? = nil
   @State private var showDeleteConfirm = false
   @State private var expandedProjects: Set<String> = []
+  @State private var draftTaskForNew: CodMateTask? = nil
 
   var body: some View {
     let countsDisplay = viewModel.projectCountsDisplay()
@@ -39,6 +40,14 @@ struct ProjectsListView: View {
             onNewSubproject: { parent in
               newParentProject = parent
               showNewProject = true
+            },
+            onNewTask: { project in
+              guard project.id != SessionListViewModel.otherProjectId else { return }
+              draftTaskForNew = CodMateTask(
+                title: "",
+                description: nil,
+                projectId: project.id
+              )
             },
             onEdit: {
               editingProject = $0
@@ -134,6 +143,23 @@ struct ProjectsListView: View {
         )
       )
       .environmentObject(viewModel)
+    }
+    .sheet(item: $draftTaskForNew) { task in
+      EditTaskSheet(
+        task: task,
+        mode: .new,
+        onSave: { updatedTask in
+          Task {
+            if let workspaceVM = viewModel.workspaceVM {
+              await workspaceVM.updateTask(updatedTask)
+            }
+            draftTaskForNew = nil
+          }
+        },
+        onCancel: {
+          draftTaskForNew = nil
+        }
+      )
     }
     .confirmationDialog(
       "Delete project?",
@@ -258,6 +284,7 @@ private struct ProjectTreeNodeView: View {
   let onDoubleTap: (Project) -> Void
   let onNewSession: (Project) -> Void
   let onNewSubproject: (Project) -> Void
+  let onNewTask: (Project) -> Void
   let onEdit: (Project) -> Void
   let onDelete: (Project) -> Void
   let onReveal: (Project) -> Void
@@ -279,6 +306,7 @@ private struct ProjectTreeNodeView: View {
               onDoubleTap: onDoubleTap,
               onNewSession: onNewSession,
               onNewSubproject: onNewSubproject,
+              onNewTask: onNewTask,
               onEdit: onEdit,
               onDelete: onDelete,
               onReveal: onReveal,
@@ -370,6 +398,11 @@ private struct ProjectTreeNodeView: View {
       onNewSession(project)
     } label: {
       Label("New Session", systemImage: "plus")
+    }
+    Button {
+      onNewTask(project)
+    } label: {
+      Label("New Task…", systemImage: "checklist")
     }
     Button {
       onNewSubproject(project)

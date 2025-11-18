@@ -27,6 +27,7 @@ struct TaskListView: View {
     @State private var showDeleteConfirmation = false
     @State private var lastClickedID: SessionSummary.ID? = nil
     @State private var pendingMove: PendingSessionMove? = nil
+    @State private var editingMode: EditTaskSheet.Mode = .edit
 
     private var currentProjectId: String? {
         viewModel.selectedProjectIDs.first
@@ -96,6 +97,7 @@ struct TaskListView: View {
         .sheet(item: $editingTask) { task in
             EditTaskSheet(
                 task: task,
+                mode: editingMode,
                 onSave: { updatedTask in
                     Task {
                         await workspaceVM.updateTask(updatedTask)
@@ -193,8 +195,10 @@ struct TaskListView: View {
         }
 
         let sectionSessionIDs = Set(section.sessions.map(\.id))
+        let calendar = Calendar.current
 
-        // Build per-task sessions limited to this section
+        // Build per-task sessions limited to this section, and also include
+        // tasks that currently have no sessions but were updated on this day.
         var taskSectionSessions: [UUID: [SessionSummary]] = [:]
         var tasksInSection: [TaskWithSessions] = []
         for task in enrichedTasks {
@@ -202,10 +206,17 @@ struct TaskListView: View {
             if !inSection.isEmpty {
                 tasksInSection.append(task)
                 taskSectionSessions[task.task.id] = inSection
+            } else if task.sessions.isEmpty,
+                      calendar.isDate(task.task.updatedAt, inSameDayAs: section.id) {
+                // New or empty tasks should still appear in the Tasks view
+                // on the day they were last updated, even before any sessions
+                // are assigned to them.
+                tasksInSection.append(task)
+                taskSectionSessions[task.task.id] = []
             }
         }
         guard !tasksInSection.isEmpty else {
-            // No tasks in this section; fall back to standalone sessions only.
+            // No tasks relevant for this section; fall back to standalone sessions only.
             return section.sessions.map { .session($0) }
         }
 
@@ -410,11 +421,28 @@ struct TaskListView: View {
             ))
             .contentShape(Rectangle())
             .onTapGesture(count: 2) {
+                editingMode = .edit
                 editingTask = taskWithSessions.task
             }
             .contextMenu {
                 Button("Edit Task") {
+                    editingMode = .edit
                     editingTask = taskWithSessions.task
+                }
+                if let project = projectForTask(taskWithSessions.task) {
+                    Divider()
+                    Button("New Session") {
+                        viewModel.newSession(project: project)
+                    }
+                    Button("New Task…") {
+                        let draft = CodMateTask(
+                            title: "",
+                            description: nil,
+                            projectId: project.id
+                        )
+                        editingMode = .new
+                        editingTask = draft
+                    }
                 }
                 Divider()
                 Button("Delete Task", role: .destructive) {
@@ -457,6 +485,21 @@ struct TaskListView: View {
             Button("Resume") { onResume(session) }
             Button("Reveal in Finder") { onReveal(session) }
             Button("Export as Markdown") { onExportMarkdown(session) }
+            if let project = projectForSession(session, parentTask: parentTask) {
+                Divider()
+                Button("New Session") {
+                    viewModel.newSession(project: project)
+                }
+                Button("New Task…") {
+                    let draft = CodMateTask(
+                        title: "",
+                        description: nil,
+                        projectId: project.id
+                    )
+                    editingMode = .new
+                    editingTask = draft
+                }
+            }
             if parentTask != nil {
                 Divider()
                 Button("Remove from Task") {
@@ -573,6 +616,21 @@ struct TaskListView: View {
     private func handleMoveRequest(session: SessionSummary, fromTask: CodMateTask, toTask: CodMateTask) {
         pendingMove = PendingSessionMove(session: session, fromTask: fromTask, toTask: toTask)
     }
+
+    private func projectForSession(_ session: SessionSummary, parentTask: CodMateTask?) -> Project? {
+        if let parentTask {
+            return projectForTask(parentTask)
+        }
+        guard let pid = viewModel.projectIdForSession(session.id) else { return nil }
+        if pid == SessionListViewModel.otherProjectId { return nil }
+        return viewModel.projects.first(where: { $0.id == pid })
+    }
+
+    private func projectForTask(_ task: CodMateTask) -> Project? {
+        let pid = task.projectId
+        if pid == SessionListViewModel.otherProjectId { return nil }
+        return viewModel.projects.first(where: { $0.id == pid })
+    }
 }
 
 // MARK: - New Task Sheet
@@ -620,15 +678,27 @@ struct NewTaskSheet: View {
 
 // MARK: - Edit Task Sheet
 struct EditTaskSheet: View {
+    enum Mode {
+        case new
+        case edit
+    }
+
     let task: CodMateTask
+    let mode: Mode
     @State private var title: String
     @State private var description: String
     @State private var status: TaskStatus
     let onSave: (CodMateTask) -> Void
     let onCancel: () -> Void
 
-    init(task: CodMateTask, onSave: @escaping (CodMateTask) -> Void, onCancel: @escaping () -> Void) {
+    init(
+        task: CodMateTask,
+        mode: Mode = .edit,
+        onSave: @escaping (CodMateTask) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
         self.task = task
+        self.mode = mode
         self._title = State(initialValue: task.title)
         self._description = State(initialValue: task.description ?? "")
         self._status = State(initialValue: task.status)
@@ -638,7 +708,7 @@ struct EditTaskSheet: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Text("Edit Task")
+            Text(mode == .new ? "New Task" : "Edit Task")
                 .font(.title2)
                 .fontWeight(.bold)
 

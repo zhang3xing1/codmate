@@ -23,6 +23,7 @@ struct SessionListColumnView: View {
   var onPrimarySelect: ((SessionSummary) -> Void)? = nil
   @EnvironmentObject private var viewModel: SessionListViewModel
   @State private var showNewProjectSheet = false
+  @State private var draftTaskFromSession: CodMateTask? = nil
   @State private var newProjectPrefill: ProjectEditorSheet.Prefill? = nil
   @State private var newProjectAssignIDs: [String] = []
   @State private var lastClickedID: String? = nil
@@ -48,6 +49,23 @@ struct SessionListColumnView: View {
         autoAssignSessionIDs: newProjectAssignIDs
       )
       .environmentObject(viewModel)
+    }
+    .sheet(item: $draftTaskFromSession) { task in
+      EditTaskSheet(
+        task: task,
+        mode: .new,
+        onSave: { updatedTask in
+          Task {
+            if let workspaceVM = viewModel.workspaceVM {
+              await workspaceVM.updateTask(updatedTask)
+            }
+            draftTaskFromSession = nil
+          }
+        },
+        onCancel: {
+          draftTaskFromSession = nil
+        }
+      )
     }
     .background(
       GeometryReader { geo in
@@ -218,6 +236,8 @@ struct SessionListColumnView: View {
 
   @ViewBuilder
   private func sessionContextMenu(for session: SessionSummary) -> some View {
+    let project = projectForSession(session)
+
     if session.source == .codexLocal {
       Button {
         onResume(session)
@@ -231,6 +251,26 @@ struct SessionListColumnView: View {
     } label: {
       Label("Edit Title & Comment", systemImage: "pencil")
     }
+
+    if let project, project.id != SessionListViewModel.otherProjectId {
+      Divider()
+      Button {
+        viewModel.newSession(project: project)
+      } label: {
+        Label("New Session", systemImage: "plus")
+      }
+      Button {
+        draftTaskFromSession = CodMateTask(
+          title: "",
+          description: nil,
+          projectId: project.id,
+          sessionIds: [session.id]
+        )
+      } label: {
+        Label("New Task…", systemImage: "checklist")
+      }
+    }
+
     if !viewModel.projects.isEmpty {
       Menu {
         Button("New Project…") {
@@ -315,26 +355,6 @@ struct SessionListColumnView: View {
           title: { $0.title }
         )
         .frame(maxWidth: .infinity)
-
-        if canCreateTaskInCurrentContext {
-          Button {
-            createNewTaskForCurrentProject()
-          } label: {
-            Image(systemName: "plus")
-              .font(.system(size: 11, weight: .semibold))
-              .frame(width: 24, height: 22)
-          }
-          .buttonStyle(.plain)
-          .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-              .fill(Color(nsColor: .textBackgroundColor))
-              .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                  .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
-              )
-          )
-          .help("Create a new task for this project")
-        }
       }
       .transition(.opacity.combined(with: .move(edge: .leading)))
     }
@@ -350,31 +370,6 @@ private struct ListColumnWidthKey: PreferenceKey {
 }
 
 extension SessionListColumnView {
-  private var canCreateTaskInCurrentContext: Bool {
-    guard viewModel.projectWorkspaceMode == .tasks,
-      viewModel.selectedProjectIDs.count == 1,
-      let pid = viewModel.selectedProjectIDs.first,
-      pid != SessionListViewModel.otherProjectId
-    else {
-      return false
-    }
-    return viewModel.workspaceVM != nil
-  }
-
-  private func createNewTaskForCurrentProject() {
-    guard let pid = viewModel.selectedProjectIDs.first,
-      pid != SessionListViewModel.otherProjectId,
-      let workspaceVM = viewModel.workspaceVM
-    else { return }
-    Task {
-      await workspaceVM.createTask(
-        title: "New Task",
-        description: nil,
-        projectId: pid
-      )
-    }
-  }
-
   private func selectedProject() -> Project? {
     guard viewModel.selectedProjectIDs.count == 1,
       let pid = viewModel.selectedProjectIDs.first
@@ -407,6 +402,12 @@ extension SessionListColumnView {
       return base.isEmpty ? p.id : base
     }
     return p.id
+  }
+
+  private func projectForSession(_ session: SessionSummary) -> Project? {
+    guard let pid = viewModel.projectIdForSession(session.id) else { return nil }
+    if pid == SessionListViewModel.otherProjectId { return nil }
+    return viewModel.projects.first(where: { $0.id == pid })
   }
 
   func selectionContains(_ id: SessionSummary.ID) -> Bool {

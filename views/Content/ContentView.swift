@@ -91,6 +91,8 @@ struct ContentView: View {
   func promptKey(_ p: SourcedPrompt) -> String { p.command }
   func canDelete(_ p: SourcedPrompt) -> Bool { true }
   @State var pendingDelete: SourcedPrompt? = nil
+  // Optional explicit anchor for New With Context when no focused session is available.
+  @State var newWithContextAnchor: SessionSummary? = nil
   // Build highlighted text where matches of `query` are tinted; non-matches use the provided base color
   func highlightedText(_ text: String, query: String, base: Color = .primary) -> Text {
     guard !query.isEmpty else {
@@ -181,6 +183,15 @@ struct ContentView: View {
     GeometryReader { geometry in
       navigationSplitView(geometry: geometry)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    .sheet(
+      isPresented: $showNewWithContext,
+      onDismiss: { newWithContextAnchor = nil }
+    ) {
+      if let anchor = newWithContextAnchor ?? focusedSummary {
+        NewWithContextSheet(isPresented: $showNewWithContext, anchor: anchor)
+          .environmentObject(viewModel)
+      }
     }
   }
 
@@ -661,6 +672,7 @@ struct ContentView: View {
 
   func startEmbeddedNewForProject(_ project: Project) {
     #if APPSTORE
+      NSLog("📌 [ContentView] startEmbeddedNewForProject (APPSTORE fallback) id=%@", project.id)
       viewModel.newSession(project: project)
       return
     #else
@@ -669,6 +681,12 @@ struct ContentView: View {
         let d = (project.directory ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return d.isEmpty ? NSHomeDirectory() : d
       }()
+      NSLog(
+        "📌 [ContentView] startEmbeddedNewForProject id=%@ dir=%@ useEmbeddedCLIConsole=%@",
+        project.id, dir, viewModel.preferences.useEmbeddedCLIConsole ? "YES" : "NO"
+      )
+      // Ensure Terminal tab is active so the embedded session is visible
+      selectedDetailTab = .terminal
       if viewModel.preferences.useEmbeddedCLIConsole {
         let dirURL = URL(fileURLWithPath: dir, isDirectory: true)
         if !AuthorizationHub.shared.canAccessNow(directory: dirURL) {
@@ -678,6 +696,7 @@ struct ContentView: View {
             message: "Authorize this folder for CLI console to run codex"
           )
           guard granted || AuthorizationHub.shared.canAccessNow(directory: dirURL) else {
+            NSLog("⚠️ [ContentView] Authorization denied for embedded New dir=%@", dir)
             return
           }
         }
@@ -698,10 +717,12 @@ struct ContentView: View {
 
       // Always use a virtual anchor for project-level New
       let anchorId = "new-anchor:project:\(project.id):\(Int(Date().timeIntervalSince1970)))"
+      NSLog("📌 [ContentView] Embedded New anchor=%@ command=%@", anchorId, command)
       embeddedInitialCommands[anchorId] =
         preclear + "\n" + cd + "\n" + exports + "\n" + command + "\n"
       runningSessionIDs.insert(anchorId)
       selectedTerminalKey = anchorId
+      sessionDetailTabs[anchorId] = .terminal
       // Pending rekey: when the new session lands under this cwd, move PTY to the real id
       pendingEmbeddedRekeys.append(
         PendingEmbeddedRekey(

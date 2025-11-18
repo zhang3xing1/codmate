@@ -315,9 +315,282 @@ extension ContentView {
             requestStopEmbedded(forID: id)
           }
         }
+      } else if let project = selectedProjectForDetailNew() {
+        // When there is no focused session but a single real project
+        // is selected, still offer project-scoped New entry so users
+        // can start Codex/Claude sessions directly from the detail bar.
+        if selectedDetailTab != .terminal {
+          let embeddedPreferredNew =
+            viewModel.preferences.defaultResumeUseEmbeddedTerminal && !AppSandbox.isEnabled
+          SplitPrimaryMenuButton(
+            title: "New",
+            systemImage: "plus",
+            primary: {
+              if embeddedPreferredNew {
+                // Defer to shared embedded flow for project-level New
+                viewModel.newSession(project: project)
+              } else {
+                startExternalNewForProject(project)
+              }
+            },
+            items: buildProjectNewMenuItems(for: project)
+          )
+        }
       }
 
     }
+  }
+}
+
+// MARK: - Project-level New helpers (detail toolbar)
+
+private extension ContentView {
+  /// Single selected real project for project-scoped New.
+  func selectedProjectForDetailNew() -> Project? {
+    guard viewModel.selectedProjectIDs.count == 1,
+      let pid = viewModel.selectedProjectIDs.first
+    else { return nil }
+    // Exclude synthetic "Other" bucket
+    if pid == SessionListViewModel.otherProjectId { return nil }
+    return viewModel.projects.first(where: { $0.id == pid })
+  }
+
+  // Minimal shell path escaper for cd commands in clipboard
+  func shellEscapedPath(_ path: String) -> String {
+    if path.isEmpty { return "''" }
+    let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "/.-_"))
+    let needsQuotes = path.rangeOfCharacter(from: allowed.inverted) != nil
+    var output = path.replacingOccurrences(of: "'", with: "'\\''")
+    if needsQuotes { output = "'\(output)'" }
+    return output
+  }
+
+  func shellQuoteIfNeeded(_ v: String) -> String {
+    if v.isEmpty { return "''" }
+    if v.contains(where: { $0.isWhitespace || $0 == "'" || $0 == "\"" }) {
+      return "'" + v.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+    return v
+  }
+
+  // Build split menu items for project-level New actions
+  func buildProjectNewMenuItems(for project: Project) -> [SplitMenuItem] {
+    var items: [SplitMenuItem] = []
+    // Upper group: Codex quick targets (Terminal/iTerm2/Warp)
+    items.append(
+      .init(
+        kind: .action(title: "Codex with Terminal") {
+          let dir =
+            (project.directory?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap {
+              $0.isEmpty ? nil : $0
+            } ?? NSHomeDirectory()
+          let pb = NSPasteboard.general
+          pb.clearContents()
+          pb.setString(simpleProjectNewCommands(project: project) + "\n", forType: .string)
+          _ = viewModel.openAppleTerminal(at: dir)
+          Task {
+            await SystemNotifier.shared.notify(
+              title: "CodMate", body: "Command copied. Paste it in Terminal.")
+          }
+        }))
+    items.append(
+      .init(
+        kind: .action(title: "Codex with iTerm2") {
+          let dir =
+            (project.directory?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap {
+              $0.isEmpty ? nil : $0
+            } ?? NSHomeDirectory()
+          let cmd = viewModel.buildNewProjectCLIInvocation(project: project)
+          viewModel.openPreferredTerminalViaScheme(app: .iterm2, directory: dir, command: cmd)
+        }))
+    items.append(
+      .init(
+        kind: .action(title: "Codex with Warp") {
+          let dir =
+            (project.directory?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap {
+              $0.isEmpty ? nil : $0
+            } ?? NSHomeDirectory()
+          let pb = NSPasteboard.general
+          pb.clearContents()
+          pb.setString(simpleProjectNewCommands(project: project) + "\n", forType: .string)
+          viewModel.openPreferredTerminalViaScheme(app: .warp, directory: dir)
+          Task {
+            await SystemNotifier.shared.notify(
+              title: "CodMate", body: "Command copied. Paste it in Warp.")
+          }
+        }))
+    // Divider
+    items.append(.init(kind: .separator))
+    // Middle group: Claude quick targets — project-level (fallback to simple "claude" command)
+    items.append(
+      .init(
+        kind: .action(title: "Claude with Terminal") {
+          let dir =
+            (project.directory?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap {
+              $0.isEmpty ? nil : $0
+            } ?? NSHomeDirectory()
+          let cmd = buildClaudeProjectInvocation(for: project)
+          let pb = NSPasteboard.general
+          pb.clearContents()
+          pb.setString("cd " + shellEscapedPath(dir) + "\n" + cmd + "\n", forType: .string)
+          _ = viewModel.openAppleTerminal(at: dir)
+          Task {
+            await SystemNotifier.shared.notify(
+              title: "CodMate", body: "Command copied. Paste it in Terminal.")
+          }
+        }))
+    items.append(
+      .init(
+        kind: .action(title: "Claude with iTerm2") {
+          let dir =
+            (project.directory?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap {
+              $0.isEmpty ? nil : $0
+            } ?? NSHomeDirectory()
+          let cmd = buildClaudeProjectInvocation(for: project)
+          viewModel.openPreferredTerminalViaScheme(app: .iterm2, directory: dir, command: cmd)
+        }))
+    items.append(
+      .init(
+        kind: .action(title: "Claude with Warp") {
+          let dir =
+            (project.directory?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap {
+              $0.isEmpty ? nil : $0
+            } ?? NSHomeDirectory()
+          let pb = NSPasteboard.general
+          pb.clearContents()
+          let cmd = buildClaudeProjectInvocation(for: project)
+          pb.setString("cd " + shellEscapedPath(dir) + "\n" + cmd + "\n", forType: .string)
+          viewModel.openPreferredTerminalViaScheme(app: .warp, directory: dir)
+          Task {
+            await SystemNotifier.shared.notify(
+              title: "CodMate", body: "Command copied. Paste it in Warp.")
+          }
+        }))
+    // Third group: New With Context… — enabled when we can infer an anchor session.
+    items.append(.init(kind: .separator))
+    let anchor = defaultAnchorForNewWithContext(project: project)
+    items.append(
+      .init(
+        kind: .action(title: "New With Context…", disabled: anchor == nil) {
+          guard let anchor else { return }
+          newWithContextAnchor = anchor
+          showNewWithContext = true
+        }))
+    return items
+  }
+
+  /// Fallback anchor selection for New With Context when no focused session exists:
+  /// pick the most recently updated session in the given project (if any).
+  func defaultAnchorForNewWithContext(project: Project?) -> SessionSummary? {
+    let all = viewModel.allSessions
+    let candidates: [SessionSummary]
+    if let project {
+      candidates = all.filter { viewModel.projectIdForSession($0.id) == project.id }
+    } else {
+      candidates = all
+    }
+    guard !candidates.isEmpty else { return nil }
+    return candidates.max { lhs, rhs in
+      let l = lhs.lastUpdatedAt ?? lhs.startedAt
+      let r = rhs.lastUpdatedAt ?? rhs.startedAt
+      return l < r
+    }
+  }
+
+  // Build external Terminal flow exactly like SessionListColumnView's project New
+  // external branch, but scoped to the detail toolbar.
+  func startExternalNewForProject(_ project: Project) {
+    let app = viewModel.preferences.defaultResumeExternalApp
+    let dir: String = {
+      let d = (project.directory ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      return d.isEmpty ? NSHomeDirectory() : d
+    }()
+    switch app {
+    case .iterm2:
+      let cmd = viewModel.buildNewProjectCLIInvocation(project: project)
+      viewModel.openPreferredTerminalViaScheme(app: .iterm2, directory: dir, command: cmd)
+    case .warp:
+      let pb = NSPasteboard.general
+      pb.clearContents()
+      pb.setString(simpleProjectNewCommands(project: project) + "\n", forType: .string)
+      viewModel.openPreferredTerminalViaScheme(app: .warp, directory: dir)
+    case .terminal:
+      let pb = NSPasteboard.general
+      pb.clearContents()
+      pb.setString(simpleProjectNewCommands(project: project) + "\n", forType: .string)
+      _ = viewModel.openAppleTerminal(at: dir)
+    case .none:
+      break
+    }
+    Task {
+      await SystemNotifier.shared.notify(
+        title: "CodMate", body: "Command copied. Paste it in the opened terminal.")
+    }
+    // Hint + targeted refresh aligns with viewModel.newSession external path
+    viewModel.setIncrementalHintForCodexToday()
+    Task { await viewModel.refreshIncrementalForNewCodexToday() }
+  }
+
+  func simpleProjectNewCommands(project: Project) -> String {
+    let dir: String = {
+      let d = (project.directory ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      return d.isEmpty ? NSHomeDirectory() : d
+    }()
+    let cd = "cd " + shellEscapedPath(dir)
+    let cmd = viewModel.buildNewProjectCLIInvocation(project: project)
+    return cd + "\n" + cmd
+  }
+
+  // Build a Claude invocation honoring project/default model and runtime flags
+  func buildClaudeProjectInvocation(for project: Project) -> String {
+    var parts: [String] = ["claude"]
+    let opt = viewModel.preferences.resumeOptions
+
+    // Verbose / Debug
+    if opt.claudeVerbose { parts.append("--verbose") }
+    if opt.claudeDebug {
+      parts.append("-d")
+      if let f = opt.claudeDebugFilter, !f.isEmpty { parts.append(shellQuoteIfNeeded(f)) }
+    }
+    // Permission mode and safety switches
+    if let pm = opt.claudePermissionMode, pm != .default {
+      parts.append(contentsOf: ["--permission-mode", shellQuoteIfNeeded(pm.rawValue)])
+    }
+    if opt.claudeSkipPermissions { parts.append("--dangerously-skip-permissions") }
+    if opt.claudeAllowSkipPermissions { parts.append("--allow-dangerously-skip-permissions") }
+
+    // Allowed/Disallowed tools
+    if let allow = opt.claudeAllowedTools, !allow.isEmpty {
+      parts.append(contentsOf: ["--allowed-tools", shellQuoteIfNeeded(allow)])
+    }
+    if let disallow = opt.claudeDisallowedTools, !disallow.isEmpty {
+      parts.append(contentsOf: ["--disallowed-tools", shellQuoteIfNeeded(disallow)])
+    }
+    // Add dirs (split by comma/whitespace)
+    if let add = opt.claudeAddDirs, !add.isEmpty {
+      let items = add.split(whereSeparator: { $0 == "," || $0.isWhitespace }).map(String.init)
+        .filter { !$0.isEmpty }
+      for d in items { parts.append(contentsOf: ["--add-dir", shellQuoteIfNeeded(d)]) }
+    }
+
+    // IDE / Strict MCP
+    if opt.claudeIDE { parts.append("--ide") }
+    if opt.claudeStrictMCP { parts.append("--strict-mcp-config") }
+
+    // Fallback model
+    if let fb = opt.claudeFallbackModel, !fb.isEmpty {
+      parts.append(contentsOf: ["--fallback-model", shellQuoteIfNeeded(fb)])
+    }
+
+    // Effective model: prefer project profile model, else preferences fallback
+    let effectiveModel = (project.profile?.model ?? viewModel.preferences.claudeFallbackModel)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if !effectiveModel.isEmpty {
+      parts.append("--model")
+      parts.append(shellQuoteIfNeeded(effectiveModel))
+    }
+
+    return parts.joined(separator: " ")
   }
 }
 

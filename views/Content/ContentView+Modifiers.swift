@@ -226,10 +226,15 @@ extension ContentView {
     view
       .onReceive(NotificationCenter.default.publisher(for: .codMateStartEmbeddedNewProject)) {
         note in
+        NSLog("📌 [ContentView] Received codMateStartEmbeddedNewProject: %@", note.userInfo ?? [:])
         if let pid = note.userInfo?["projectId"] as? String,
           let project = viewModel.projects.first(where: { $0.id == pid })
         {
+          NSLog("📌 [ContentView] Starting embedded New for project id=%@", pid)
           startEmbeddedNewForProject(project)
+        } else {
+          NSLog("⚠️ [ContentView] Project for embedded New not found; id=%@",
+                note.userInfo?["projectId"] as? String ?? "<nil>")
         }
       }
       .onReceive(NotificationCenter.default.publisher(for: .codMateToggleSidebar)) { _ in

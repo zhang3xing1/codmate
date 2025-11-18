@@ -156,6 +156,13 @@ extension SessionListViewModel {
     /// Unified Project "New Session" entry. Respects embedded/external preference
     /// to reduce branching between Sidebar and Detail flows.
     func newSession(project: Project) {
+        let embeddedPreferred = preferences.defaultResumeUseEmbeddedTerminal
+        NSLog(
+            "📌 [SessionListVM] newSession(project:%@) embeddedPreferred=%@ useEmbeddedCLIConsole=%@",
+            project.id,
+            embeddedPreferred ? "YES" : "NO",
+            preferences.useEmbeddedCLIConsole ? "YES" : "NO"
+        )
         // Record intent so the new session can be auto-assigned to this project
         recordIntentForProjectNew(project: project)
 

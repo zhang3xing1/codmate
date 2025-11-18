@@ -82,12 +82,6 @@ extension ContentView {
     .sheet(item: $viewModel.editingSession, onDismiss: { viewModel.cancelEdits() }) { _ in
       EditSessionMetaView(viewModel: viewModel)
     }
-    .sheet(isPresented: $showNewWithContext) {
-      if let focused = focusedSummary {
-        NewWithContextSheet(isPresented: $showNewWithContext, anchor: focused)
-          .environmentObject(viewModel)
-      }
-    }
   }
 
   // Content column that switches between the session list and a simple placeholder

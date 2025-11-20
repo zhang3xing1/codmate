@@ -156,6 +156,7 @@ struct ContentView: View {
     let expectedCwd: String
     let t0: Date
     let selectOnSuccess: Bool
+    let projectId: String?
   }
   @State private var pendingEmbeddedRekeys: [PendingEmbeddedRekey] = []
   func makeTerminalFont() -> NSFont {
@@ -383,6 +384,244 @@ struct ContentView: View {
     return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
   }
 
+  /// Launches a new session using the given anchor and shared task context.
+  /// This regenerates ~/.codmate/tasks/context-<taskId>.md before launching.
+  func newSessionWithTaskContext(task: CodMateTask, anchor: SessionSummary) {
+    // Only support local sessions as anchors for now; remote sessions
+    // cannot reliably access the local ~/.codmate/tasks directory.
+    guard !anchor.isRemote else { return }
+
+    Task {
+      guard let workspaceVM = viewModel.workspaceVM else { return }
+      _ = await workspaceVM.syncTaskContext(taskId: task.id)
+
+      let taskIdString = task.id.uuidString
+      let pathHint = "~/.codmate/tasks/context-\(taskIdString).md"
+      let promptLines: [String] = [
+        "当前 Task 的共享上下文已整理并保存到本地文件：",
+        pathHint,
+        "",
+        "在回答本次问题前，如有需要，请先阅读该文件以了解任务历史记录和相关约束。",
+      ]
+      let prompt = promptLines.joined(separator: "\n")
+
+      #if APPSTORE
+        // App Store 版本不支持嵌入式终端，直接使用外部终端流程。
+        let dir: String = {
+          if FileManager.default.fileExists(atPath: anchor.cwd) {
+            return anchor.cwd
+          } else {
+            return anchor.fileURL.deletingLastPathComponent().path
+          }
+        }()
+
+        // External terminals rely on the existing auto-assign intent mechanism.
+        viewModel.recordIntentForDetailNew(anchor: anchor)
+
+        // Hint + targeted refresh so new session appears quickly in lists
+        if anchor.source == .codexLocal {
+          viewModel.setIncrementalHintForCodexToday()
+        } else {
+          viewModel.setIncrementalHintForClaudeProject(directory: dir)
+        }
+        Task {
+          if anchor.source == .codexLocal {
+            await viewModel.refreshIncrementalForNewCodexToday()
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            await viewModel.refreshIncrementalForNewCodexToday()
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await viewModel.refreshIncrementalForNewCodexToday()
+          } else {
+            await viewModel.refreshIncrementalForClaudeProject(directory: dir)
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            await viewModel.refreshIncrementalForClaudeProject(directory: dir)
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await viewModel.refreshIncrementalForClaudeProject(directory: dir)
+          }
+        }
+
+        let app = viewModel.preferences.defaultResumeExternalApp
+        switch app {
+        case .iterm2:
+          let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(
+            session: anchor,
+            initialPrompt: prompt
+          )
+          let pb = NSPasteboard.general
+          pb.clearContents()
+          pb.setString(cmd + "\n", forType: .string)
+          viewModel.openPreferredTerminalViaScheme(app: .iterm2, directory: dir, command: cmd)
+        case .warp:
+          let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(
+            session: anchor,
+            initialPrompt: prompt
+          )
+          let pb = NSPasteboard.general
+          pb.clearContents()
+          pb.setString(cmd + "\n", forType: .string)
+          viewModel.openPreferredTerminalViaScheme(app: .warp, directory: dir)
+        case .terminal:
+          viewModel.openNewSessionRespectingProject(session: anchor, initialPrompt: prompt)
+          let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(
+            session: anchor,
+            initialPrompt: prompt
+          )
+          let pb = NSPasteboard.general
+          pb.clearContents()
+          pb.setString(cmd + "\n", forType: .string)
+        case .none:
+          _ = viewModel.openAppleTerminal(at: dir)
+          let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(
+            session: anchor,
+            initialPrompt: prompt
+          )
+          let pb = NSPasteboard.general
+          pb.clearContents()
+          pb.setString(cmd + "\n", forType: .string)
+        }
+      #else
+        if viewModel.preferences.defaultResumeUseEmbeddedTerminal {
+          // 在内置终端中运行新的会话，并把 Task 上下文作为初始提示注入。
+          selectedDetailTab = .terminal
+          sessionDetailTabs[anchor.id] = .terminal
+          let source = anchor.source
+          let target = source == anchor.source ? anchor : anchor.overridingSource(source)
+          let cwd =
+            FileManager.default.fileExists(atPath: target.cwd)
+            ? target.cwd : target.fileURL.deletingLastPathComponent().path
+          // 构造带 Task 上下文的 CLI 调用
+          let invocation = viewModel.buildNewSessionCLIInvocationRespectingProject(
+            session: target,
+            initialPrompt: prompt
+          )
+          let cd = "cd " + shellEscapeForCD(cwd)
+          let preclear = "printf '\\033[?1049h\\033[H\\033[2J'"
+
+          // 使用虚拟 anchor id 以便后续 rekey 到真实新会话。
+          let anchorId = "new-anchor:task:\(task.id.uuidString):\(Int(Date().timeIntervalSince1970)))"
+          embeddedInitialCommands[anchorId] =
+            preclear + "\n" + cd + "\n" + invocation + "\n"
+          runningSessionIDs.insert(anchorId)
+          selectedTerminalKey = anchorId
+          sessionDetailTabs[anchorId] = .terminal
+          pendingEmbeddedRekeys.append(
+            PendingEmbeddedRekey(
+              anchorId: anchorId,
+              expectedCwd: canonicalizePath(cwd),
+              t0: Date(),
+              selectOnSuccess: true,
+              projectId: task.projectId
+            )
+          )
+          // Event-driven incremental refresh for quick visibility in Tasks/Sessions lists
+          if target.source == .codexLocal {
+            viewModel.setIncrementalHintForCodexToday()
+          } else {
+            viewModel.setIncrementalHintForClaudeProject(directory: cwd)
+          }
+          Task {
+            if target.source == .codexLocal {
+              await viewModel.refreshIncrementalForNewCodexToday()
+              try? await Task.sleep(nanoseconds: 600_000_000)
+              await viewModel.refreshIncrementalForNewCodexToday()
+              try? await Task.sleep(nanoseconds: 1_500_000_000)
+              await viewModel.refreshIncrementalForNewCodexToday()
+            } else {
+              await viewModel.refreshIncrementalForClaudeProject(directory: cwd)
+              try? await Task.sleep(nanoseconds: 600_000_000)
+              await viewModel.refreshIncrementalForClaudeProject(directory: cwd)
+              try? await Task.sleep(nanoseconds: 1_500_000_000)
+              await viewModel.refreshIncrementalForClaudeProject(directory: cwd)
+            }
+          }
+          selection.removeAll()
+          isDetailMaximized = true
+          columnVisibility = .detailOnly
+        } else {
+          // 回退到现有的外部终端逻辑
+          let dir: String = {
+            if FileManager.default.fileExists(atPath: anchor.cwd) {
+              return anchor.cwd
+            } else {
+              return anchor.fileURL.deletingLastPathComponent().path
+            }
+          }()
+
+          // External terminals rely on the auto-assign intent mechanism (project only).
+          viewModel.recordIntentForDetailNew(anchor: anchor)
+
+          // Hint + targeted refresh so new session appears quickly in lists
+          if anchor.source == .codexLocal {
+            viewModel.setIncrementalHintForCodexToday()
+          } else {
+            viewModel.setIncrementalHintForClaudeProject(directory: dir)
+          }
+          Task {
+            if anchor.source == .codexLocal {
+              await viewModel.refreshIncrementalForNewCodexToday()
+              try? await Task.sleep(nanoseconds: 600_000_000)
+              await viewModel.refreshIncrementalForNewCodexToday()
+              try? await Task.sleep(nanoseconds: 1_500_000_000)
+              await viewModel.refreshIncrementalForNewCodexToday()
+            } else {
+              await viewModel.refreshIncrementalForClaudeProject(directory: dir)
+              try? await Task.sleep(nanoseconds: 600_000_000)
+              await viewModel.refreshIncrementalForClaudeProject(directory: dir)
+              try? await Task.sleep(nanoseconds: 1_500_000_000)
+              await viewModel.refreshIncrementalForClaudeProject(directory: dir)
+            }
+          }
+
+          let app = viewModel.preferences.defaultResumeExternalApp
+          switch app {
+          case .iterm2:
+            let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(
+              session: anchor,
+              initialPrompt: prompt
+            )
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(cmd + "\n", forType: .string)
+            viewModel.openPreferredTerminalViaScheme(
+              app: .iterm2, directory: dir, command: cmd)
+          case .warp:
+            let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(
+              session: anchor,
+              initialPrompt: prompt
+            )
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(cmd + "\n", forType: .string)
+            viewModel.openPreferredTerminalViaScheme(app: .warp, directory: dir)
+          case .terminal:
+            viewModel.openNewSessionRespectingProject(session: anchor, initialPrompt: prompt)
+            let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(
+              session: anchor,
+              initialPrompt: prompt
+            )
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(cmd + "\n", forType: .string)
+          case .none:
+            _ = viewModel.openAppleTerminal(at: dir)
+            let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(
+              session: anchor,
+              initialPrompt: prompt
+            )
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(cmd + "\n", forType: .string)
+          }
+        }
+      #endif
+
+      await SystemNotifier.shared.notify(
+        title: "CodMate",
+        body: "Command copied. Session starts with shared Task context."
+      )
+    }
+  }
+
   func workingDirectory(for session: SessionSummary) -> String {
     if FileManager.default.fileExists(atPath: session.cwd) {
       return session.cwd
@@ -563,6 +802,9 @@ struct ContentView: View {
     return nil
   }
 
+  /// Schedule a short-lived incremental refresh loop to surface newly created
+  /// sessions for auto-assign (project / task) matching. Uses a 2s interval
+  /// for up to ~2 minutes, aligned with the PendingAssignIntent lifetime.
   func startEmbeddedNew(for session: SessionSummary, using source: SessionSource? = nil) {
     let target = source.map { session.overridingSource($0) } ?? session
     #if APPSTORE
@@ -590,19 +832,7 @@ struct ContentView: View {
         }
       }
       let cd = "cd " + shellEscapeForCD(cwd)
-      let injectedPATH = CLIEnvironment.buildInjectedPATH()
-      var exportLines = [
-        "export LANG=zh_CN.UTF-8",
-        "export LC_ALL=zh_CN.UTF-8",
-        "export LC_CTYPE=zh_CN.UTF-8",
-        "export TERM=xterm-256color",
-      ]
-      if target.source == .codexLocal {
-        exportLines.append("export CODEX_DISABLE_COLOR_QUERY=1")
-      }
-      let exports = exportLines.joined(separator: "; ")
       let invocation = viewModel.buildNewSessionCLIInvocationRespectingProject(session: target)
-      let command = "PATH=\(injectedPATH) \(invocation)"
       // Enter alternate screen and clear for a truly clean view (cursor home);
       // avoids reflow artifacts and isolates scrollback while the new session runs.
       let preclear = "printf '\\033[?1049h\\033[H\\033[2J'"
@@ -610,14 +840,19 @@ struct ContentView: View {
       // Use virtual anchor id to avoid hijacking an existing session's running state
       let anchorId = "new-anchor:detail:\(target.id):\(Int(Date().timeIntervalSince1970)))"
       embeddedInitialCommands[anchorId] =
-        preclear + "\n" + cd + "\n" + exports + "\n" + command + "\n"
+        preclear + "\n" + cd + "\n" + invocation + "\n"
       runningSessionIDs.insert(anchorId)
       selectedTerminalKey = anchorId
       sessionDetailTabs[anchorId] = .terminal
       // Record pending rekey so that when the new session appears, we can move this PTY to the real id
       pendingEmbeddedRekeys.append(
         PendingEmbeddedRekey(
-          anchorId: anchorId, expectedCwd: canonicalizePath(cwd), t0: Date(), selectOnSuccess: true)
+          anchorId: anchorId,
+          expectedCwd: canonicalizePath(cwd),
+          t0: Date(),
+          selectOnSuccess: true,
+          projectId: viewModel.projectIdForSession(target.id)
+        )
       )
       // Event-driven incremental refresh: set a hint so directory monitor triggers a targeted refresh
       if target.source == .codexLocal {
@@ -690,31 +925,27 @@ struct ContentView: View {
         }
       }
       let cd = "cd " + shellEscapeForCD(dir)
-      let injectedPATH = CLIEnvironment.buildInjectedPATH()
-      let exportLines = [
-        "export LANG=zh_CN.UTF-8",
-        "export LC_ALL=zh_CN.UTF-8",
-        "export LC_CTYPE=zh_CN.UTF-8",
-        "export TERM=xterm-256color",
-        "export CODEX_DISABLE_COLOR_QUERY=1",
-      ]
-      let exports = exportLines.joined(separator: "; ")
       let invocation = viewModel.buildNewProjectCLIInvocation(project: project)
-      let command = "PATH=\(injectedPATH) \(invocation)"
+      let command = invocation
       let preclear = "printf '\\033[?1049h\\033[H\\033[2J'"
 
       // Always use a virtual anchor for project-level New
       let anchorId = "new-anchor:project:\(project.id):\(Int(Date().timeIntervalSince1970)))"
       NSLog("📌 [ContentView] Embedded New anchor=%@ command=%@", anchorId, command)
       embeddedInitialCommands[anchorId] =
-        preclear + "\n" + cd + "\n" + exports + "\n" + command + "\n"
+        preclear + "\n" + cd + "\n" + invocation + "\n"
       runningSessionIDs.insert(anchorId)
       selectedTerminalKey = anchorId
       sessionDetailTabs[anchorId] = .terminal
       // Pending rekey: when the new session lands under this cwd, move PTY to the real id
       pendingEmbeddedRekeys.append(
         PendingEmbeddedRekey(
-          anchorId: anchorId, expectedCwd: canonicalizePath(dir), t0: Date(), selectOnSuccess: true)
+          anchorId: anchorId,
+          expectedCwd: canonicalizePath(dir),
+          t0: Date(),
+          selectOnSuccess: true,
+          projectId: project.id
+        )
       )
       // Event-driven incremental refresh: scoped to today's Codex folder
       viewModel.setIncrementalHintForCodexToday()
@@ -1061,6 +1292,11 @@ extension ContentView {
         }
         if pending.selectOnSuccess || selection.contains(pending.anchorId) {
           selection = [winner.id]
+        }
+        if let pid = pending.projectId {
+          Task {
+            await viewModel.assignSessions(to: pid, ids: [winner.id])
+          }
         }
       } else {
         if now.timeIntervalSince(pending.t0) < 180 {

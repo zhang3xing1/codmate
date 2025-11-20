@@ -18,6 +18,7 @@ struct TaskListView: View {
   var isUpdating: ((SessionSummary) -> Bool)? = nil
   var isAwaitingFollowup: ((SessionSummary) -> Bool)? = nil
   var onPrimarySelect: ((SessionSummary) -> Void)? = nil
+  var onNewSessionWithTaskContext: ((CodMateTask, SessionSummary) -> Void)? = nil
 
   @State private var showNewTaskSheet = false
   @State private var newTaskTitle = ""
@@ -113,7 +114,7 @@ struct TaskListView: View {
         }
       )
     }
-    .task {
+    .task(id: currentProjectId) {
       if let projectId = currentProjectId {
         await workspaceVM.loadTasks(for: projectId)
       }
@@ -452,19 +453,15 @@ struct TaskListView: View {
         editingTask = taskWithSessions.task
       }
       .contextMenu {
-        Button("Edit Task") {
-          editingMode = .edit
-          editingTask = taskWithSessions.task
-        }
-        if let anchor = latestLocalSession(for: taskWithSessions) {
-          Divider()
-          Button("New Session with Task Context") {
-            newSessionWithTaskContext(task: taskWithSessions.task, anchor: anchor)
-          }
-        }
         if let project = projectForTask(taskWithSessions.task) {
           Button("New Session") {
-            viewModel.newSession(project: project)
+            if let handler = onNewSessionWithTaskContext,
+              let anchor = latestLocalSession(for: taskWithSessions)
+            {
+              handler(taskWithSessions.task, anchor)
+            } else {
+              viewModel.newSession(project: project)
+            }
           }
           Button("New Task…") {
             let draft = CodMateTask(
@@ -475,8 +472,12 @@ struct TaskListView: View {
             editingMode = .new
             editingTask = draft
           }
+          Divider()
         }
-        Divider()
+        Button("Edit Task") {
+          editingMode = .edit
+          editingTask = taskWithSessions.task
+        }
         Button("Delete Task", role: .destructive) {
           taskToDelete = taskWithSessions.task
           showDeleteConfirmation = true
@@ -519,11 +520,6 @@ struct TaskListView: View {
       Button("Export as Markdown") { onExportMarkdown(session) }
       if let project = projectForSession(session, parentTask: parentTask) {
         Divider()
-        if let parentTask {
-          Button("New Session with Task Context") {
-            newSessionWithTaskContext(task: parentTask, anchor: session)
-          }
-        }
         Button("New Session") {
           viewModel.newSession(project: project)
         }
@@ -685,84 +681,6 @@ struct TaskListView: View {
       let rDate = rhs.lastUpdatedAt ?? rhs.startedAt
       return lDate < rDate
     })
-  }
-
-  /// Launches a new session using the given anchor and shared task context.
-  /// This regenerates ~/.codmate/tasks/context-<taskId>.md before launching.
-  private func newSessionWithTaskContext(task: CodMateTask, anchor: SessionSummary) {
-    // Only support local sessions as anchors for now; remote sessions
-    // cannot reliably access the local ~/.codmate/tasks directory.
-    if anchor.isRemote { return }
-
-    Task {
-      _ = await workspaceVM.syncTaskContext(taskId: task.id)
-
-      // Record intent so the new session can be auto-assigned to the same project.
-      viewModel.recordIntentForDetailNew(anchor: anchor)
-
-      let taskIdString = task.id.uuidString
-      let pathHint = "~/.codmate/tasks/context-\(taskIdString).md"
-      let promptLines: [String] = [
-        "当前 Task 的共享上下文已整理并保存到本地文件：",
-        pathHint,
-        "",
-        "在回答本次问题前，如有需要，请先阅读该文件以了解任务历史记录和相关约束。",
-      ]
-      let prompt = promptLines.joined(separator: "\n")
-
-      let dir: String = {
-        if FileManager.default.fileExists(atPath: anchor.cwd) {
-          return anchor.cwd
-        } else {
-          return anchor.fileURL.deletingLastPathComponent().path
-        }
-      }()
-
-      let app = viewModel.preferences.defaultResumeExternalApp
-      switch app {
-      case .iterm2:
-        let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(
-          session: anchor,
-          initialPrompt: prompt
-        )
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(cmd + "\n", forType: .string)
-        viewModel.openPreferredTerminalViaScheme(app: .iterm2, directory: dir, command: cmd)
-      case .warp:
-        let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(
-          session: anchor,
-          initialPrompt: prompt
-        )
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(cmd + "\n", forType: .string)
-        viewModel.openPreferredTerminalViaScheme(app: .warp, directory: dir)
-      case .terminal:
-        viewModel.openNewSessionRespectingProject(session: anchor, initialPrompt: prompt)
-        let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(
-          session: anchor,
-          initialPrompt: prompt
-        )
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(cmd + "\n", forType: .string)
-      case .none:
-        _ = viewModel.openAppleTerminal(at: dir)
-        let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(
-          session: anchor,
-          initialPrompt: prompt
-        )
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(cmd + "\n", forType: .string)
-      }
-
-      await SystemNotifier.shared.notify(
-        title: "CodMate",
-        body: "Command copied. Session starts with shared Task context."
-      )
-    }
   }
 }
 

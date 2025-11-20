@@ -8,32 +8,39 @@ extension ContentView {
       // Left: view mode segmented (Timeline | Git Review | Terminal)
       Group {
         #if canImport(SwiftTerm) && !APPSTORE
-          let items: [SegmentedIconPicker<ContentView.DetailTab>.Item] = [
-            .init(title: "Timeline", systemImage: "clock", tag: .timeline),
-            .init(title: "Terminal", systemImage: "terminal", tag: .terminal),
-          ]
-          let selection = Binding<ContentView.DetailTab>(
-            get: { selectedDetailTab },
-            set: { newValue in
-              if newValue == .terminal {
-                if hasAvailableEmbeddedTerminal() {
-                  if let focused = focusedSummary, runningSessionIDs.contains(focused.id) {
-                    selectedTerminalKey = focused.id
-                  } else if let anchorId = fallbackRunningAnchorId() {
-                    selectedTerminalKey = anchorId
-                  } else {
-                    selectedTerminalKey = runningSessionIDs.first
+          if viewModel.preferences.defaultResumeUseEmbeddedTerminal {
+            let items: [SegmentedIconPicker<ContentView.DetailTab>.Item] = [
+              .init(title: "Timeline", systemImage: "clock", tag: .timeline),
+              .init(title: "Terminal", systemImage: "terminal", tag: .terminal),
+            ]
+            let selection = Binding<ContentView.DetailTab>(
+              get: { selectedDetailTab },
+              set: { newValue in
+                if newValue == .terminal {
+                  if hasAvailableEmbeddedTerminal() {
+                    if let focused = focusedSummary, runningSessionIDs.contains(focused.id) {
+                      selectedTerminalKey = focused.id
+                    } else if let anchorId = fallbackRunningAnchorId() {
+                      selectedTerminalKey = anchorId
+                    } else {
+                      selectedTerminalKey = runningSessionIDs.first
+                    }
+                    selectedDetailTab = .terminal
+                  } else if let focused = focusedSummary {
+                    pendingTerminalLaunch = PendingTerminalLaunch(session: focused)
                   }
-                  selectedDetailTab = .terminal
-                } else if let focused = focusedSummary {
-                  pendingTerminalLaunch = PendingTerminalLaunch(session: focused)
+                } else {
+                  selectedDetailTab = newValue
                 }
-              } else {
-                selectedDetailTab = newValue
               }
-            }
-          )
-          SegmentedIconPicker(items: items, selection: selection)
+            )
+            SegmentedIconPicker(items: items, selection: selection)
+          } else {
+            let items: [SegmentedIconPicker<ContentView.DetailTab>.Item] = [
+              .init(title: "Timeline", systemImage: "clock", tag: .timeline)
+            ]
+            SegmentedIconPicker(items: items, selection: $selectedDetailTab)
+          }
         #else
           let items: [SegmentedIconPicker<ContentView.DetailTab>.Item] = [
             .init(title: "Timeline", systemImage: "clock", tag: .timeline)

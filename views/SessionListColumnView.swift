@@ -21,6 +21,8 @@ struct SessionListColumnView: View {
   var isAwaitingFollowup: ((SessionSummary) -> Bool)? = nil
   // notify which item is the user's primary (last clicked) for detail focus
   var onPrimarySelect: ((SessionSummary) -> Void)? = nil
+  // callback for launching new session with task context
+  var onNewSessionWithTaskContext: ((CodMateTask, SessionSummary) -> Void)? = nil
   @EnvironmentObject private var viewModel: SessionListViewModel
   @State private var showNewProjectSheet = false
   @State private var draftTaskFromSession: CodMateTask? = nil
@@ -93,7 +95,8 @@ struct SessionListColumnView: View {
         isRunning: isRunning,
         isUpdating: isUpdating,
         isAwaitingFollowup: isAwaitingFollowup,
-        onPrimarySelect: onPrimarySelect
+        onPrimarySelect: onPrimarySelect,
+        onNewSessionWithTaskContext: onNewSessionWithTaskContext
       )
     } else {
       // Regular sessions list for other modes

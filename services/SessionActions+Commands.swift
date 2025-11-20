@@ -448,10 +448,9 @@ extension SessionActions {
             FileManager.default.fileExists(atPath: session.cwd)
             ? session.cwd : session.fileURL.deletingLastPathComponent().path
         let cd = "cd " + shellEscapedPath(cwd)
-        let exports = embeddedExportLines(for: session.source).joined(separator: "; ")
-        // MAS: do not execute external CLI in embedded terminal.
+        // MAS: do not execute external CLI in embedded terminal; only show a notice.
         let notice = "echo \"[CodMate] App Store 沙盒无法直接运行 codex/claude CLI，请在外部终端执行复制的命令。\""
-        return cd + "\n" + exports + "\n" + notice + "\n"
+        return cd + "\n" + notice + "\n"
         #else
         if session.isRemote, let host = session.remoteHost {
             let sshContext = resolvedSSHContext(for: host)
@@ -470,11 +469,9 @@ extension SessionActions {
             FileManager.default.fileExists(atPath: session.cwd)
             ? session.cwd : session.fileURL.deletingLastPathComponent().path
         let cd = "cd " + shellEscapedPath(cwd)
-        let exports = embeddedExportLines(for: session.source).joined(separator: "; ")
-        let injectedPATH = CLIEnvironment.buildInjectedPATH()
         let invocation = buildNewSessionCLIInvocation(session: session, options: options)
-        let command = "PATH=\(injectedPATH) \(invocation)"
-        return cd + "\n" + exports + "\n" + command + "\n"
+        // Standard New Session: only emit `cd` + bare CLI invocation.
+        return cd + "\n" + invocation + "\n"
         #endif
     }
 
@@ -687,33 +684,12 @@ extension SessionActions {
             }
             return nil
         }()
-        // Build exports similarly to embedded version so users can paste easily
-        let prepend = project.profile?.pathPrepend ?? []
-        let prependString = prepend.filter {
-            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }.joined(separator: ":")
-        let injectedPATH = CLIEnvironment.buildInjectedPATH(
-            additionalPaths: prependString.isEmpty ? [] : [prependString]
-        )
-        var exportLines: [String] = [
-            "export LANG=zh_CN.UTF-8",
-            "export LC_ALL=zh_CN.UTF-8",
-            "export LC_CTYPE=zh_CN.UTF-8",
-            "export TERM=xterm-256color",
-        ]
-        if let env = project.profile?.env {
-            for (k, v) in env {
-                let key = k.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !key.isEmpty else { continue }
-                exportLines.append("export \(key)=\(shellSingleQuoted(v))")
-            }
-        }
-        let exports = exportLines.joined(separator: "; ")
         let cmd = buildNewProjectCLIInvocation(project: project, options: options)
         if let cd = cdLine {
-            return cd + "\n" + exports + "\n" + "PATH=\(injectedPATH) \(cmd)\n"
+            // Standard external New Session: emit `cd` + bare CLI invocation only.
+            return cd + "\n" + cmd + "\n"
         } else {
-            return exports + "\n" + "PATH=\(injectedPATH) \(cmd)\n"
+            return cmd + "\n"
         }
     }
 
@@ -852,22 +828,22 @@ extension SessionActions {
         initialPrompt: String? = nil
     ) -> String {
         _ = executableURL
-        var exportLines: [String] = [
-            "export LANG=zh_CN.UTF-8",
-            "export LC_ALL=zh_CN.UTF-8",
-            "export LC_CTYPE=zh_CN.UTF-8",
-            "export TERM=xterm-256color",
-        ]
-        if let env = project.profile?.env {
-            for (k, v) in env {
-                let key = k.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !key.isEmpty else { continue }
-                exportLines.append("export \(key)=\(shellSingleQuoted(v))")
-            }
-        }
         let invocation = buildNewSessionUsingProjectProfileCLIInvocation(
             session: session, project: project, options: options, initialPrompt: initialPrompt)
         if session.isRemote, let host = session.remoteHost {
+            var exportLines: [String] = [
+                "export LANG=zh_CN.UTF-8",
+                "export LC_ALL=zh_CN.UTF-8",
+                "export LC_CTYPE=zh_CN.UTF-8",
+                "export TERM=xterm-256color",
+            ]
+            if let env = project.profile?.env {
+                for (k, v) in env {
+                    let key = k.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !key.isEmpty else { continue }
+                    exportLines.append("export \(key)=\(shellSingleQuoted(v))")
+                }
+            }
             let sshContext = resolvedSSHContext(for: host)
             let remote = buildRemoteShellCommand(
                 session: session,
@@ -884,9 +860,8 @@ extension SessionActions {
             FileManager.default.fileExists(atPath: session.cwd)
             ? session.cwd : session.fileURL.deletingLastPathComponent().path
         let cd = "cd " + shellEscapedPath(cwd)
-        let exports = exportLines.joined(separator: "; ")
-        let command = invocation
-        return cd + "\n" + exports + "\n" + command + "\n"
+        // Local project-profile New: only emit `cd` + bare CLI invocation.
+        return cd + "\n" + invocation + "\n"
     }
 
     func buildExternalNewSessionUsingProjectProfileCommands(

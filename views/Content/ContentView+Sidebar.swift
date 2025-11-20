@@ -58,7 +58,8 @@ extension ContentView {
       isRunning: { runningSessionIDs.contains($0.id) },
       isUpdating: { viewModel.isActivelyUpdating($0.id) },
       isAwaitingFollowup: { viewModel.isAwaitingFollowup($0.id) },
-      onPrimarySelect: { s in selectionPrimaryId = s.id }
+      onPrimarySelect: { s in selectionPrimaryId = s.id },
+      onNewSessionWithTaskContext: newSessionWithTaskContext
     )
     .id(isListHidden ? "list-hidden" : "list-shown")
     .environmentObject(viewModel)

@@ -98,7 +98,11 @@ extension SessionListViewModel {
         let canonical = Self.canonicalPath(expectedCwd)
         pendingAssignIntents.append(
             PendingAssignIntent(
-                projectId: projectId, expectedCwd: canonical, t0: Date(), hints: hints))
+                projectId: projectId,
+                expectedCwd: canonical,
+                t0: Date(),
+                hints: hints
+            ))
         pruneExpiredIntents()
     }
 }

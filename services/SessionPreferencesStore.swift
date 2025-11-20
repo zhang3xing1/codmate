@@ -140,7 +140,13 @@ final class SessionPreferencesStore: ObservableObject {
 
     // Default editor for quick open (files)
     let editorRaw = defaults.string(forKey: Keys.defaultFileEditor) ?? EditorApp.vscode.rawValue
-    self.defaultFileEditor = EditorApp(rawValue: editorRaw) ?? .vscode
+    var editor = EditorApp(rawValue: editorRaw) ?? .vscode
+    // If the stored editor is no longer installed, fall back to the first installed option when available.
+    let installedEditors = EditorApp.installedEditors
+    if !installedEditors.isEmpty, !installedEditors.contains(editor) {
+      editor = installedEditors[0]
+    }
+    self.defaultFileEditor = editor
 
     // Git Review defaults
     self.gitShowLineNumbers = defaults.object(forKey: Keys.gitShowLineNumbers) as? Bool ?? true

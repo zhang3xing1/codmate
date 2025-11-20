@@ -410,26 +410,21 @@ private struct ProjectTreeNodeView: View {
       Label("New Subproject", systemImage: "plus.square.on.square")
     }
     Divider()
-    Menu {
-      ForEach(EditorApp.allCases) { editor in
-        Button {
-          onOpenInEditor(project, editor)
-        } label: {
-          HStack {
+    let editors = EditorApp.installedEditors
+    if !editors.isEmpty {
+      Menu {
+        ForEach(editors) { editor in
+          Button {
+            onOpenInEditor(project, editor)
+          } label: {
             Label(editor.title, systemImage: "chevron.left.forwardslash.chevron.right")
-            if !editor.isInstalled {
-              Text("(Not Installed)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
           }
         }
-        .disabled(!editor.isInstalled)
+      } label: {
+        Label("Open in", systemImage: "arrow.up.forward.app")
       }
-    } label: {
-      Label("Open in", systemImage: "arrow.up.forward.app")
+      .disabled(project.directory == nil || project.directory?.isEmpty == true)
     }
-    .disabled(project.directory == nil || project.directory?.isEmpty == true)
 
     Button {
       onReveal(project)

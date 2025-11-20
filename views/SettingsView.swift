@@ -197,19 +197,27 @@ struct SettingsView: View {
           settingsCard {
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
               GridRow {
+                let editors = EditorApp.installedEditors
                 VStack(alignment: .leading, spacing: 0) {
                   Label("Default Editor", systemImage: "pencil.and.outline")
                     .font(.subheadline).fontWeight(.medium)
                   Text("Used for quick open actions in Review and elsewhere")
                     .font(.caption).foregroundStyle(.secondary)
                 }
-                Picker("", selection: $preferences.defaultFileEditor) {
-                  ForEach(EditorApp.allCases) { app in
-                    Text(app.title).tag(app)
+                if editors.isEmpty {
+                  Text("No supported editors found. Install VS Code, Cursor, or Zed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                } else {
+                  Picker("", selection: $preferences.defaultFileEditor) {
+                    ForEach(editors) { app in
+                      Text(app.title).tag(app)
+                    }
                   }
+                  .labelsHidden()
+                  .frame(maxWidth: .infinity, alignment: .trailing)
                 }
-                .labelsHidden()
-                .frame(maxWidth: .infinity, alignment: .trailing)
               }
             }
           }

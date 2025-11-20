@@ -40,7 +40,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # Now that ROOT_DIR is known, set entitlements path default if not provided
 ENTITLEMENTS_PATH="${ENTITLEMENTS_PATH:-$ROOT_DIR/CodMate/CodMate.entitlements}"
 BUILD_DIR="$ROOT_DIR/build-mas"
-OUTPUT_DIR="${OUTPUT_DIR:-$HOME/Downloads}"
+OUTPUT_DIR="${OUTPUT_DIR:-/Volumes/External/Downloads}"
 DERIVED_DATA="$BUILD_DIR/DerivedData"
 EXPORT_OPTIONS_PLIST="$BUILD_DIR/ExportOptions-MAS.plist"
 BUILD_LOG="$BUILD_DIR/build.log"

@@ -8,6 +8,12 @@ enum EditorApp: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// Editors that are currently available on this system.
+    /// This is computed once per launch by probing the bundle id and CLI.
+    static let installedEditors: [EditorApp] = {
+        allCases.filter { $0.isInstalled }
+    }()
+
     var title: String {
         switch self {
         case .vscode: return "Visual Studio Code"

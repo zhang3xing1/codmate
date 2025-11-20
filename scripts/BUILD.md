@@ -125,7 +125,7 @@ SANDBOX=off ./scripts/macos-build-notarized-dmg.sh
 | `CONFIG` | `Release` | Build configuration |
 | `ARCH_MATRIX` | `arm64 x86_64` | Architectures to build |
 | `MIN_MACOS` | `15.0` | Minimum macOS version |
-| `OUTPUT_DIR` | `~/Downloads` | Output directory |
+| `OUTPUT_DIR` | `/Volumes/External/Downloads` | Output directory |
 
 ### MAS-Specific
 | Variable | Default | Description |
@@ -241,7 +241,7 @@ APPLE_PASSWORD="xxxx-xxxx-xxxx-xxxx"
 5. Monitor review status
 
 ### Developer ID
-1. DMG files are in `~/Downloads` (or `$OUTPUT_DIR`)
+1. DMG files are in `/Volumes/External/Downloads` (or `$OUTPUT_DIR`)
 2. Test on different Macs (Intel + Apple Silicon)
 3. Upload to your distribution server/CDN
 4. Update website download links

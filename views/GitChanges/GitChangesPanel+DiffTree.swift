@@ -161,7 +161,15 @@ extension GitChangesPanel {
                     .overlay(alignment: .trailing) {
                             HStack(spacing: hoverButtonSpacing) {
                             if hoverFilePath == hoverKey {
-                                Button { vm.openFile(path, using: preferences.defaultFileEditor) } label: {
+                                Button {
+                                    let editor = preferences.defaultFileEditor
+                                    if EditorApp.installedEditors.contains(editor) {
+                                        vm.openFile(path, using: editor)
+                                    } else {
+                                        let full = vm.repoRoot?.appendingPathComponent(path).path ?? path
+                                        NSWorkspace.shared.open(URL(fileURLWithPath: full))
+                                    }
+                                } label: {
                                     Image(systemName: "square.and.pencil")
                                         .foregroundStyle((hoverEditPath == hoverKey) ? Color.accentColor : Color.secondary)
                                 }
@@ -234,10 +242,15 @@ extension GitChangesPanel {
                     } else {
                         Button("Stage") { Task { await vm.stage(paths: [path]) } }
                     }
-                    Divider()
-                    Button("Open in VS Code") { vm.openFile(path, using: .vscode) }
-                    Button("Open in Cursor") { vm.openFile(path, using: .cursor) }
-                    Button("Open in Zed") { vm.openFile(path, using: .zed) }
+                    let editors = EditorApp.installedEditors
+                    if !editors.isEmpty {
+                        Divider()
+                        ForEach(editors) { editor in
+                            Button("Open in \(editor.title)") {
+                                vm.openFile(path, using: editor)
+                            }
+                        }
+                    }
                     Button("Open with Default App") { NSWorkspace.shared.open(URL(fileURLWithPath: vm.repoRoot?.appendingPathComponent(path).path ?? path)) }
 #if canImport(AppKit)
                     Button("Reveal in Finder") { revealInFinder(path: path, isDirectory: false) }

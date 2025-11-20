@@ -223,7 +223,13 @@ extension GitChangesPanel {
                 HStack(spacing: hoverButtonSpacing) {
                     if activeHover {
                         Button {
-                            vm.openFile(path, using: preferences.defaultFileEditor)
+                            let editor = preferences.defaultFileEditor
+                            if EditorApp.installedEditors.contains(editor) {
+                                vm.openFile(path, using: editor)
+                            } else {
+                                let full = vm.repoRoot?.appendingPathComponent(path).path ?? path
+                                NSWorkspace.shared.open(URL(fileURLWithPath: full))
+                            }
                         } label: {
                             Image(systemName: "square.and.pencil")
                                 .foregroundStyle((hoverBrowserEditPath == path) ? Color.accentColor : Color.secondary)
@@ -280,7 +286,13 @@ extension GitChangesPanel {
         }
         .contextMenu {
             Button("Open in Editor") {
-                vm.openFile(path, using: preferences.defaultFileEditor)
+                let editor = preferences.defaultFileEditor
+                if EditorApp.installedEditors.contains(editor) {
+                    vm.openFile(path, using: editor)
+                } else {
+                    let full = vm.repoRoot?.appendingPathComponent(path).path ?? path
+                    NSWorkspace.shared.open(URL(fileURLWithPath: full))
+                }
             }
 #if canImport(AppKit)
             Button("Reveal in Finder") {
@@ -304,7 +316,13 @@ extension GitChangesPanel {
             }
         }
         .onTapGesture(count: 2) {
-            vm.openFile(path, using: preferences.defaultFileEditor)
+            let editor = preferences.defaultFileEditor
+            if EditorApp.installedEditors.contains(editor) {
+                vm.openFile(path, using: editor)
+            } else {
+                let full = vm.repoRoot?.appendingPathComponent(path).path ?? path
+                NSWorkspace.shared.open(URL(fileURLWithPath: full))
+            }
         }
     }
 

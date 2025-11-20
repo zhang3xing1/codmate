@@ -41,7 +41,7 @@ SIGNING_CERT="${SIGNING_CERT:-}"
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
-OUTPUT_DIR="${OUTPUT_DIR:-$HOME/Downloads}"
+OUTPUT_DIR="${OUTPUT_DIR:-/Volumes/External/Downloads}"
 DERIVED_DATA="$BUILD_DIR/DerivedData"
 EXPORT_OPTIONS_PLIST="$BUILD_DIR/ExportOptions.plist"
 

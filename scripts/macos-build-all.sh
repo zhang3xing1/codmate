@@ -75,7 +75,7 @@ fi
 echo "========================================"
 echo "  All Builds Complete!"
 echo "========================================"
-echo "Output directory: ${OUTPUT_DIR:-$HOME/Downloads}"
+echo "Output directory: ${OUTPUT_DIR:-/Volumes/External/Downloads}"
 echo ""
 echo "Next steps:"
 if [[ "$BUILD_DEVID_ONLY" != "1" ]]; then

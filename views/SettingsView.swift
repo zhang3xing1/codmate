@@ -51,6 +51,7 @@ struct SettingsView: View {
           HStack(alignment: .center, spacing: 8) {
             Image(systemName: category.icon)
               .foregroundStyle(isSelected ? Color.white : Color.accentColor)
+              .frame(width: 26, alignment: .center)
             VStack(alignment: .leading, spacing: 0) {
               Text(category.title)
                 .font(.headline)
@@ -58,6 +59,7 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: 0)
           }
           .padding(.vertical, 6)

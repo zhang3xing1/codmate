@@ -135,6 +135,19 @@ actor GeminiSessionProvider {
     return loader.turns(from: parsed.rows)
   }
 
+  func environmentContext(for summary: SessionSummary) async -> EnvironmentContextInfo? {
+    guard let url = canonicalURL(for: summary) else { return nil }
+    guard
+      let hash = projectHash(for: url),
+      let parsed = parser.parse(
+        at: url,
+        projectHash: hash,
+        resolvedProjectPath: await resolveProjectPath(forHash: hash))
+    else { return nil }
+    let loader = SessionTimelineLoader()
+    return loader.loadEnvironmentContext(from: parsed.rows)
+  }
+
   func enrich(summary: SessionSummary) async -> SessionSummary? {
     guard let url = canonicalURL(for: summary) else { return summary }
     guard

@@ -165,7 +165,7 @@ struct SessionDetailView: View {
                 }
                 .task(id: environmentExpanded) {
                     guard environmentExpanded else { return }
-                    guard summary.source == .codexLocal else {
+                    guard !summary.source.isRemote else {
                         environmentInfo = nil
                         environmentLoading = false
                         return
@@ -173,7 +173,17 @@ struct SessionDetailView: View {
                     guard environmentInfo == nil else { return }
                     environmentLoading = true
                     defer { environmentLoading = false }
-                    environmentInfo = try? loader.loadEnvironmentContext(url: summary.fileURL)
+
+                    // Load environment context based on source type
+                    if summary.source.baseKind == .gemini {
+                        environmentInfo = await viewModel.geminiProvider.environmentContext(for: summary)
+                    } else if summary.source.baseKind == .claude {
+                        // Claude sessions can also benefit from the new method if needed
+                        environmentInfo = try? loader.loadEnvironmentContext(url: summary.fileURL)
+                    } else {
+                        // Codex sessions use the file-based method
+                        environmentInfo = try? loader.loadEnvironmentContext(url: summary.fileURL)
+                    }
                 }
             } label: {
                 Label("Environment Context", systemImage: "macwindow")
@@ -205,7 +215,7 @@ struct SessionDetailView: View {
                 }
                 .task(id: instructionsExpanded) {
                     guard instructionsExpanded else { return }
-                    guard summary.source == .codexLocal else {
+                    guard !summary.source.isRemote else {
                         instructionsText = nil
                         instructionsLoading = false
                         return
@@ -503,9 +513,9 @@ extension SessionDetailView {
     /// (to exclude it since it's already shown in the dedicated section above)
     private func findFirstEnvironmentContextID(in turns: [ConversationTurn]) -> String? {
         for turn in turns {
-            // Check outputs for Environment Context
+            // Check outputs for Environment Context or Context Updated (from turnContext)
             for output in turn.outputs {
-                if output.title == TimelineEvent.environmentContextTitle {
+                if output.title == TimelineEvent.environmentContextTitle || output.title == "Context Updated" {
                     return output.id
                 }
             }

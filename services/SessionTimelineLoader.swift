@@ -335,6 +335,64 @@ struct SessionTimelineLoader {
         return nil
     }
 
+    func loadEnvironmentContext(from rows: [SessionRow]) -> EnvironmentContextInfo? {
+        var latest: TimelineEvent?
+
+        for row in rows {
+            switch row.kind {
+            case let .turnContext(payload):
+                // Extract environment context from turnContext (for Gemini sessions)
+                var metadata: [String: String] = [:]
+                if let model = payload.model { metadata["model"] = model }
+                if let cwd = payload.cwd { metadata["cwd"] = cwd }
+                if let approval = payload.approvalPolicy { metadata["approval"] = approval }
+
+                if !metadata.isEmpty {
+                    var textParts: [String] = []
+                    if let model = metadata["model"] { textParts.append("model: \(model)") }
+                    if let cwd = metadata["cwd"] { textParts.append("cwd: \(cwd)") }
+                    if let approval = metadata["approval"] { textParts.append("approval: \(approval)") }
+
+                    latest = TimelineEvent(
+                        id: UUID().uuidString,
+                        timestamp: row.timestamp,
+                        actor: .info,
+                        title: TimelineEvent.environmentContextTitle,
+                        text: textParts.joined(separator: "\n"),
+                        metadata: metadata
+                    )
+                }
+            case let .eventMessage(payload):
+                let type = payload.type.lowercased()
+                if type == "environment_context",
+                   let envText = payload.message ?? payload.text,
+                   let event = makeEnvironmentContextEvent(text: envText, timestamp: row.timestamp)
+                {
+                    latest = event
+                }
+            case let .responseItem(payload):
+                if payload.type.lowercased() == "message" {
+                    let text = joinedText(from: payload.content ?? [])
+                    guard text.contains("<environment_context") else { continue }
+                    if let event = makeEnvironmentContextEvent(text: text, timestamp: row.timestamp) {
+                        latest = event
+                    }
+                }
+            default:
+                continue
+            }
+        }
+
+        guard let event = latest else { return nil }
+        let metadataPairs = (event.metadata ?? [:]).sorted(by: { $0.key < $1.key })
+        let entries = metadataPairs.map { EnvironmentContextInfo.Entry(key: $0.key, value: $0.value) }
+        return EnvironmentContextInfo(
+            timestamp: event.timestamp,
+            entries: entries,
+            rawText: event.text
+        )
+    }
+
     func loadEnvironmentContext(url: URL) throws -> EnvironmentContextInfo? {
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
         guard !data.isEmpty else { return nil }
@@ -348,6 +406,28 @@ struct SessionTimelineLoader {
             guard let row = try? decoder.decode(SessionRow.self, from: Data(slice)) else { continue }
 
             switch row.kind {
+            case let .turnContext(payload):
+                // Extract environment context from turnContext (for Gemini sessions)
+                var metadata: [String: String] = [:]
+                if let model = payload.model { metadata["model"] = model }
+                if let cwd = payload.cwd { metadata["cwd"] = cwd }
+                if let approval = payload.approvalPolicy { metadata["approval"] = approval }
+
+                if !metadata.isEmpty {
+                    var textParts: [String] = []
+                    if let model = metadata["model"] { textParts.append("model: \(model)") }
+                    if let cwd = metadata["cwd"] { textParts.append("cwd: \(cwd)") }
+                    if let approval = metadata["approval"] { textParts.append("approval: \(approval)") }
+
+                    latest = TimelineEvent(
+                        id: UUID().uuidString,
+                        timestamp: row.timestamp,
+                        actor: .info,
+                        title: TimelineEvent.environmentContextTitle,
+                        text: textParts.joined(separator: "\n"),
+                        metadata: metadata
+                    )
+                }
             case let .eventMessage(payload):
                 let type = payload.type.lowercased()
                 if type == "environment_context",

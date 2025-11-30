@@ -537,7 +537,8 @@ actor GlobalSearchService {
           )
         else { continue }
         for case let url as URL in enumerator {
-          if url.pathExtension.lowercased() != "jsonl" { continue }
+          let ext = url.pathExtension.lowercased()
+          if ext != "jsonl" && ext != "json" { continue }
           let path = url.path
           if seen.contains(path) { continue }
           seen.insert(path)

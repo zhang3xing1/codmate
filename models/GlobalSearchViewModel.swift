@@ -307,6 +307,9 @@ final class GlobalSearchViewModel: ObservableObject {
     if let claudeRoot = Self.defaultClaudeSessionsRoot(), FileManager.default.fileExists(atPath: claudeRoot.path) {
       if !sessionRoots.contains(claudeRoot) { sessionRoots.append(claudeRoot) }
     }
+    if let geminiRoot = Self.defaultGeminiSessionsRoot(), FileManager.default.fileExists(atPath: geminiRoot.path) {
+      if !sessionRoots.contains(geminiRoot) { sessionRoots.append(geminiRoot) }
+    }
     return GlobalSearchPaths(
       sessionRoots: sessionRoots,
       notesRoot: preferences.notesRoot,
@@ -335,6 +338,26 @@ final class GlobalSearchViewModel: ObservableObject {
     let fallback = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".claude", isDirectory: true)
       .appendingPathComponent("projects", isDirectory: true)
+    return fallback
+  }
+
+  private static func defaultGeminiSessionsRoot() -> URL? {
+    #if canImport(Darwin)
+      if let pwDir = getpwuid(getuid())?.pointee.pw_dir {
+        let path = String(cString: pwDir)
+        return URL(fileURLWithPath: path, isDirectory: true)
+          .appendingPathComponent(".gemini", isDirectory: true)
+          .appendingPathComponent("tmp", isDirectory: true)
+      }
+    #endif
+    if let home = ProcessInfo.processInfo.environment["HOME"] {
+      return URL(fileURLWithPath: home, isDirectory: true)
+        .appendingPathComponent(".gemini", isDirectory: true)
+        .appendingPathComponent("tmp", isDirectory: true)
+    }
+    let fallback = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".gemini", isDirectory: true)
+      .appendingPathComponent("tmp", isDirectory: true)
     return fallback
   }
 }

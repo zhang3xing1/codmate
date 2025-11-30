@@ -12,6 +12,7 @@ extension SessionActions {
         let exeName = executableName(for: session.source.baseKind)
 
         // Prepare arguments first, including async MCP config if needed
+        var additionalEnv: [String: String] = [:]
         var args: [String]
         switch session.source.baseKind {
         case .codex:
@@ -48,7 +49,9 @@ extension SessionActions {
             try? await mcpStore.exportEnabledForClaudeConfig()
             if let fb = options.claudeFallbackModel, !fb.isEmpty { args.append(contentsOf: ["--fallback-model", fb]) }
         case .gemini:
-            args = ["--resume", conversationId(for: session)]
+            let config = geminiRuntimeConfiguration(options: options)
+            args = ["--resume", conversationId(for: session)] + config.flags
+            additionalEnv = config.environment
         }
         
         return try await withCheckedThrowingContinuation { continuation in
@@ -126,6 +129,11 @@ extension SessionActions {
                         // Built-in (no provider selected): respect login method default (subscription) by not injecting token.
                         // Nothing to inject here; PATH is already set above.
                     }
+                    if session.source.baseKind == .gemini {
+                        for (key, value) in additionalEnv {
+                            env[key] = value
+                        }
+                    }
                     process.environment = env
 
                     try process.run()
@@ -186,17 +194,63 @@ extension SessionActions {
         kind.cliExecutableName
     }
 
-    private func embeddedExportLines(for source: SessionSource) -> [String] {
-        var lines: [String] = [
-            "export LANG=zh_CN.UTF-8",
-            "export LC_ALL=zh_CN.UTF-8",
-            "export LC_CTYPE=zh_CN.UTF-8",
-            "export TERM=xterm-256color",
-        ]
-        if source.baseKind == .codex {
-            lines.append("export CODEX_DISABLE_COLOR_QUERY=1")
+    private func embeddedExportLines(for source: SessionSource) -> [String] { [] }
+
+    struct GeminiRuntimeConfiguration {
+        let flags: [String]
+        let environment: [String: String]
+    }
+
+    func geminiRuntimeConfiguration(options: ResumeOptions) -> GeminiRuntimeConfiguration {
+        var flags: [String] = []
+        var env: [String: String] = [:]
+
+        if options.dangerouslyBypass {
+            flags.append("--yolo")
+            return GeminiRuntimeConfiguration(flags: flags, environment: env)
         }
-        return lines
+
+        if options.approval == .never {
+            flags.append("--yolo")
+        } else if options.fullAuto {
+            flags.append(contentsOf: ["--approval-mode", "auto_edit"])
+        }
+
+        var sandboxPreference = options.sandbox
+        if sandboxPreference == nil && options.fullAuto {
+            sandboxPreference = .workspaceWrite
+        }
+
+        if let sandboxPreference, sandboxPreference != .dangerFullAccess {
+            flags.append("--sandbox")
+            env["GEMINI_SANDBOX"] = "sandbox-exec"
+            env["SEATBELT_PROFILE"] = geminiSeatbeltProfile(for: sandboxPreference)
+        }
+
+        return GeminiRuntimeConfiguration(flags: flags, environment: env)
+    }
+
+    func geminiEnvironmentOverrides(options: ResumeOptions) -> [String: String] {
+        geminiRuntimeConfiguration(options: options).environment
+    }
+
+    private func geminiSeatbeltProfile(for mode: SandboxMode) -> String {
+        switch mode {
+        case .readOnly:
+            // Restrictive profile keeps writes tightly contained while allowing network access
+            return "restrictive-open"
+        case .workspaceWrite:
+            return "permissive-open"
+        case .dangerFullAccess:
+            return "permissive-open"
+        }
+    }
+
+    func geminiEnvironmentExportLines(environment: [String: String]) -> [String] {
+        guard !environment.isEmpty else { return [] }
+        return environment
+            .sorted { $0.key < $1.key }
+            .map { "export \($0.key)=\(shellSingleQuoted($0.value))" }
     }
 
     // Build environment overlay map for embedding (DEV CLI console)
@@ -232,54 +286,70 @@ extension SessionActions {
             if f.isEmpty { return "\(exe) resume \(conversationId(for: session))" }
             return ([exe] + f + ["resume", shellQuoteIfNeeded(conversationId(for: session))]).joined(separator: " ")
         case .claude:
-            var parts: [String] = [exe]
-            parts.append("--resume")
-            parts.append(shellQuoteIfNeeded(session.id))
-            // Apply Claude runtime flags on resume as well, to match actual launch behavior
-            if options.claudeVerbose { parts.append("--verbose") }
-            if options.claudeDebug {
-                parts.append("-d")
-                if let f = options.claudeDebugFilter, !f.isEmpty { parts.append(shellQuoteIfNeeded(f)) }
+            let args = claudeResumeArguments(session: session, options: options).map {
+                shellQuoteIfNeeded($0)
             }
-            if let pm = options.claudePermissionMode, pm != .default {
-                parts.append(contentsOf: ["--permission-mode", shellQuoteIfNeeded(pm.rawValue)])
-            }
-            if options.claudeSkipPermissions { parts.append("--dangerously-skip-permissions") }
-            if options.claudeAllowSkipPermissions { parts.append("--allow-dangerously-skip-permissions") }
-            // Claude CLI does not support an "--allow-unsandboxed-commands" flag; omit it.
-            if let allowed = options.claudeAllowedTools, !allowed.isEmpty {
-                parts.append(contentsOf: ["--allowed-tools", shellQuoteIfNeeded(allowed)])
-            }
-            if let disallowed = options.claudeDisallowedTools, !disallowed.isEmpty {
-                parts.append(contentsOf: ["--disallowed-tools", shellQuoteIfNeeded(disallowed)])
-            }
-            if let addDirs = options.claudeAddDirs, !addDirs.isEmpty {
-                let dirParts = addDirs.split(whereSeparator: { $0 == "," || $0.isWhitespace }).map { String($0) }.filter { !$0.isEmpty }
-                for dir in dirParts { parts.append(contentsOf: ["--add-dir", shellQuoteIfNeeded(dir)]) }
-            }
-            if options.claudeIDE { parts.append("--ide") }
-            if options.claudeStrictMCP { parts.append("--strict-mcp-config") }
-            if let fb = options.claudeFallbackModel, !fb.isEmpty { parts.append(contentsOf: ["--fallback-model", shellQuoteIfNeeded(fb)]) }
-            return parts.joined(separator: " ")
+            return ([exe] + args).joined(separator: " ")
         case .gemini:
-            return ([exe, "--resume", shellQuoteIfNeeded(conversationId(for: session))]).joined(separator: " ")
+            let config = geminiRuntimeConfiguration(options: options)
+            let args: [String] = ["--resume", conversationId(for: session)] + config.flags
+            return ([exe] + args.map { shellQuoteIfNeeded($0) }).joined(separator: " ")
         }
     }
 
-    func buildNewSessionArguments(session: SessionSummary, options: ResumeOptions)
-        -> [String]
-    {
-        var args: [String] = []
-        // Preserve model for Codex default New (non-project) to ensure CLI has a model
-        if session.source.baseKind == .codex,
-           let normalized = normalizedCodexModelName(session.model) {
-            args += ["--model", normalized]
+    private func claudeResumeArguments(
+        session: SessionSummary,
+        options: ResumeOptions
+    ) -> [String] {
+        var parts: [String] = ["--resume", session.id]
+        if options.claudeVerbose { parts.append("--verbose") }
+        if options.claudeDebug {
+            parts.append("-d")
+            if let f = options.claudeDebugFilter, !f.isEmpty { parts.append(f) }
         }
-        // Attach sandbox/approval flags from options
-        if session.source.baseKind == .codex {
+        if let pm = options.claudePermissionMode, pm != .default {
+            parts.append(contentsOf: ["--permission-mode", pm.rawValue])
+        }
+        if options.claudeSkipPermissions { parts.append("--dangerously-skip-permissions") }
+        if options.claudeAllowSkipPermissions { parts.append("--allow-dangerously-skip-permissions") }
+        if let allowed = options.claudeAllowedTools, !allowed.isEmpty {
+            parts.append(contentsOf: ["--allowed-tools", allowed])
+        }
+        if let disallowed = options.claudeDisallowedTools, !disallowed.isEmpty {
+            parts.append(contentsOf: ["--disallowed-tools", disallowed])
+        }
+        if let addDirs = options.claudeAddDirs, !addDirs.isEmpty {
+            let dirParts = addDirs.split(whereSeparator: { $0 == "," || $0.isWhitespace }).map { String($0) }.filter { !$0.isEmpty }
+            for dir in dirParts { parts.append(contentsOf: ["--add-dir", dir]) }
+        }
+        if options.claudeIDE { parts.append("--ide") }
+        if options.claudeStrictMCP { parts.append("--strict-mcp-config") }
+        if let fb = options.claudeFallbackModel, !fb.isEmpty {
+            parts.append(contentsOf: ["--fallback-model", fb])
+        }
+        return parts
+    }
+
+    func buildNewSessionArguments(session: SessionSummary, options: ResumeOptions) -> [String] {
+        switch session.source.baseKind {
+        case .codex:
+            var args: [String] = []
+            if let normalized = normalizedCodexModelName(session.model) {
+                args += ["--model", normalized]
+            }
             args += flags(from: options)
+            return args
+        case .claude:
+            return []
+        case .gemini:
+            var args: [String] = []
+            if let rawModel = session.model?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !rawModel.isEmpty {
+                args += ["--model", rawModel]
+            }
+            args.append(contentsOf: geminiRuntimeConfiguration(options: options).flags)
+            return args
         }
-        return args
     }
 
     func buildNewSessionCLIInvocation(
@@ -418,8 +488,16 @@ extension SessionActions {
     }
 
     func buildResumeArguments(session: SessionSummary, options: ResumeOptions) -> [String] {
-        let f = flags(from: options)
-        return f + ["resume", conversationId(for: session)]
+        switch session.source.baseKind {
+        case .codex:
+            let f = flags(from: options)
+            return f + ["resume", conversationId(for: session)]
+        case .claude:
+            return claudeResumeArguments(session: session, options: options)
+        case .gemini:
+            let config = geminiRuntimeConfiguration(options: options)
+            return ["--resume", conversationId(for: session)] + config.flags
+        }
     }
 
     func buildResumeCommandLines(
@@ -453,7 +531,13 @@ extension SessionActions {
             FileManager.default.fileExists(atPath: session.cwd)
             ? session.cwd : session.fileURL.deletingLastPathComponent().path
         let cd = "cd " + shellEscapedPath(cwd)
-        let exports = embeddedExportLines(for: session.source).joined(separator: "; ")
+        var exportLines = embeddedExportLines(for: session.source)
+        if session.source.baseKind == .gemini {
+            let envLines = geminiEnvironmentExportLines(
+                environment: geminiRuntimeConfiguration(options: options).environment)
+            exportLines.append(contentsOf: envLines)
+        }
+        let exports = exportLines.joined(separator: "; ")
         let injectedPATH = CLIEnvironment.buildInjectedPATH()
         // Use bare executable name for embedded terminal to respect user's PATH resolution
         let execPath = executableName(for: session.source.baseKind)
@@ -494,9 +578,19 @@ extension SessionActions {
             FileManager.default.fileExists(atPath: session.cwd)
             ? session.cwd : session.fileURL.deletingLastPathComponent().path
         let cd = "cd " + shellEscapedPath(cwd)
+        var exportLines: [String] = []
+        if session.source.baseKind == .gemini {
+            exportLines = embeddedExportLines(for: session.source)
+            let envLines = geminiEnvironmentExportLines(
+                environment: geminiRuntimeConfiguration(options: options).environment)
+            exportLines.append(contentsOf: envLines)
+        }
+        let exports = exportLines.isEmpty ? nil : exportLines.joined(separator: "; ")
         let invocation = buildNewSessionCLIInvocation(session: session, options: options)
-        // Standard New Session: only emit `cd` + bare CLI invocation.
-        return cd + "\n" + invocation + "\n"
+        var lines = [cd]
+        if let exports { lines.append(exports) }
+        lines.append(invocation)
+        return lines.joined(separator: "\n") + "\n"
         #endif
     }
 
@@ -522,7 +616,15 @@ extension SessionActions {
             ? session.cwd : session.fileURL.deletingLastPathComponent().path
         let cd = "cd " + shellEscapedPath(cwd)
         let newCommand = buildNewSessionCLIInvocation(session: session, options: options)
-        return cd + "\n" + newCommand + "\n"
+        var lines = [cd]
+        if session.source.baseKind == .gemini {
+            lines.append(contentsOf: embeddedExportLines(for: session.source))
+            let envLines = geminiEnvironmentExportLines(
+                environment: geminiRuntimeConfiguration(options: options).environment)
+            lines.append(contentsOf: envLines)
+        }
+        lines.append(newCommand)
+        return lines.joined(separator: "\n") + "\n"
     }
 
     // Simplified two-line command for external terminals
@@ -548,7 +650,15 @@ extension SessionActions {
         let execPath = executableName(for: session.source.baseKind)
         let resume = buildResumeCLIInvocation(
             session: session, executablePath: execPath, options: options)
-        return cd + "\n" + resume + "\n"
+        var lines = [cd]
+        if session.source.baseKind == .gemini {
+            lines.append(contentsOf: embeddedExportLines(for: session.source))
+            let envLines = geminiEnvironmentExportLines(
+                environment: geminiRuntimeConfiguration(options: options).environment)
+            lines.append(contentsOf: envLines)
+        }
+        lines.append(resume)
+        return lines.joined(separator: "\n") + "\n"
     }
 
     func copyResumeCommands(

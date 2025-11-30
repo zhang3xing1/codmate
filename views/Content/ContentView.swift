@@ -717,8 +717,14 @@ struct ContentView: View {
       purpose: .cliConsoleCwd,
       message: "Authorize this folder for CLI console to run \(exe)"
     )
+    var env = consoleEnv(for: session.source)
+    if session.source.baseKind == .gemini {
+      let overrides = viewModel.actions.geminiEnvironmentOverrides(
+        options: viewModel.preferences.resumeOptions)
+      for (key, value) in overrides { env[key] = value }
+    }
     return TerminalHostView.ConsoleSpec(
-      executable: exe, args: args, cwd: cwd, env: consoleEnv(for: session.source))
+      executable: exe, args: args, cwd: cwd, env: env)
   }
 
   func consoleSpecForAnchor(_ anchorId: String) -> TerminalHostView.ConsoleSpec? {

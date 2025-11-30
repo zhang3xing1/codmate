@@ -80,6 +80,8 @@ struct GeminiSessionParser {
     else { return nil }
 
     let sessionFileId = url.deletingPathExtension().lastPathComponent
+    let resumeIdentifier = record.sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let sessionId = resumeIdentifier.isEmpty ? sessionFileId : resumeIdentifier
     let inferredDirectory =
       resolvedProjectPath
       ?? inferWorkingDirectory(from: record.messages)
@@ -88,7 +90,7 @@ struct GeminiSessionParser {
     var rows: [SessionRow] = []
 
     let meta = SessionMetaPayload(
-      id: sessionFileId,
+      id: sessionId,
       timestamp: startedAt,
       cwd: cwd,
       originator: "Gemini CLI",

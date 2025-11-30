@@ -256,7 +256,12 @@ struct SessionActions {
         session: SessionSummary,
         options: ResumeOptions
     ) -> String {
-        let exports = embeddedExportLines(for: session.source)
+        var exports = embeddedExportLines(for: session.source)
+        if session.source.baseKind == .gemini {
+            let envLines = geminiEnvironmentExportLines(
+                environment: geminiRuntimeConfiguration(options: options).environment)
+            exports.append(contentsOf: envLines)
+        }
         let invocation = buildResumeCLIInvocation(
             session: session,
             executablePath: remoteExecutableName(for: session),
@@ -274,7 +279,12 @@ struct SessionActions {
         options: ResumeOptions,
         initialPrompt: String? = nil
     ) -> String {
-        let exports = embeddedExportLines(for: session.source)
+        var exports = embeddedExportLines(for: session.source)
+        if session.source.baseKind == .gemini {
+            let envLines = geminiEnvironmentExportLines(
+                environment: geminiRuntimeConfiguration(options: options).environment)
+            exports.append(contentsOf: envLines)
+        }
         let invocation = buildLocalNewSessionCLIInvocation(
             session: session,
             options: options,

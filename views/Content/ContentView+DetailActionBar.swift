@@ -69,120 +69,58 @@ extension ContentView {
               }
             },
             items: {
-              var items: [SplitMenuItem] = []
-              // Grouped flat menu
-              // Upper group: current provider quick targets
-              let currentSrc = focused.source
-              let currentKind = currentSrc.projectSource
-              let currentName = currentSrc.branding.displayName
-              items.append(
-                .init(
-                  kind: .action(title: "\(currentName) with Terminal") {
-                    launchNewSession(for: focused, using: currentSrc, style: .terminal)
-                  }))
-              items.append(
-                .init(
-                  kind: .action(title: "\(currentName) with iTerm2") {
-                    launchNewSession(for: focused, using: currentSrc, style: .iterm)
-                  }))
-              items.append(
-                .init(
-                  kind: .action(title: "\(currentName) with Warp") {
-                    launchNewSession(for: focused, using: currentSrc, style: .warp)
-                  }))
+              let allowed = Set(viewModel.allowedSources(for: focused))
+              let requestedOrder: [ProjectSessionSource] = [.claude, .codex, .gemini]
+              let enabledRemoteHosts = viewModel.preferences.enabledRemoteHosts.sorted()
 
-              // Add remote options for current provider
-              let enabledRemoteHosts = viewModel.preferences.enabledRemoteHosts
-              if !enabledRemoteHosts.isEmpty {
-                items.append(.init(kind: .separator))
-                for host in enabledRemoteHosts.sorted() {
-                  let remoteSrc: SessionSource
-                  switch currentKind {
-                  case .codex: remoteSrc = .codexRemote(host: host)
-                  case .claude: remoteSrc = .claudeRemote(host: host)
-                  case .gemini: remoteSrc = .geminiRemote(host: host)
-                  }
-                  let remoteName = remoteSrc.branding.displayName
-                  items.append(
-                    .init(
-                      kind: .action(title: "\(remoteName) with Terminal") {
-                        launchNewSession(for: focused, using: remoteSrc, style: .terminal)
-                      }))
-                  items.append(
-                    .init(
-                      kind: .action(title: "\(remoteName) with iTerm2") {
-                        launchNewSession(for: focused, using: remoteSrc, style: .iterm)
-                      }))
-                  items.append(
-                    .init(
-                      kind: .action(title: "\(remoteName) with Warp") {
-                        launchNewSession(for: focused, using: remoteSrc, style: .warp)
-                      }))
+              func launchItems(for source: SessionSource) -> [SplitMenuItem] {
+                [
+                  .init(
+                    kind: .action(title: "Terminal") {
+                      launchNewSession(for: focused, using: source, style: .terminal)
+                    }),
+                  .init(
+                    kind: .action(title: "iTerm2") {
+                      launchNewSession(for: focused, using: source, style: .iterm)
+                    }),
+                  .init(
+                    kind: .action(title: "Warp") {
+                      launchNewSession(for: focused, using: source, style: .warp)
+                    })
+                ]
+              }
+
+              func remoteSource(for base: ProjectSessionSource, host: String) -> SessionSource {
+                switch base {
+                case .codex: return .codexRemote(host: host)
+                case .claude: return .claudeRemote(host: host)
+                case .gemini: return .geminiRemote(host: host)
                 }
               }
 
-              // Divider
-              items.append(.init(kind: .separator))
-              // Lower group: alternate provider quick targets
-              let allowed = viewModel.allowedSources(for: focused)
-              // Compute alternate src from allowed set; fallback to first available
-              let altSrc: SessionSource? = {
-                let candidateKinds = allowed.filter { $0 != currentKind }
-                guard !candidateKinds.isEmpty else { return nil }
-                let preferredOrder: [ProjectSessionSource] = [.codex, .claude, .gemini]
-                if let preferred = preferredOrder.first(where: { candidateKinds.contains($0) }) {
-                  return preferred.sessionSource
-                }
-                return candidateKinds.first?.sessionSource
-              }()
-              if let alt = altSrc {
-                let altName = alt.branding.displayName
-                items.append(
-                  .init(
-                    kind: .action(title: "\(altName) with Terminal") {
-                      launchNewSession(for: focused, using: alt, style: .terminal)
-                    }))
-                items.append(
-                  .init(
-                    kind: .action(title: "\(altName) with iTerm2") {
-                      launchNewSession(for: focused, using: alt, style: .iterm)
-                    }))
-                items.append(
-                  .init(
-                    kind: .action(title: "\(altName) with Warp") {
-                      launchNewSession(for: focused, using: alt, style: .warp)
-                    }))
+              var menuItems: [SplitMenuItem] = []
 
-                // Add remote options for alternate provider
+              for base in requestedOrder where allowed.contains(base) {
+                var providerItems = launchItems(for: base.sessionSource)
                 if !enabledRemoteHosts.isEmpty {
-                  items.append(.init(kind: .separator))
-                  for host in enabledRemoteHosts.sorted() {
-                    let remoteSrc: SessionSource
-                    switch alt.projectSource {
-                    case .codex: remoteSrc = .codexRemote(host: host)
-                    case .claude: remoteSrc = .claudeRemote(host: host)
-                    case .gemini: remoteSrc = .geminiRemote(host: host)
-                    }
-                    let remoteName = remoteSrc.branding.displayName
-                    items.append(
-                      .init(
-                        kind: .action(title: "\(remoteName) with Terminal") {
-                          launchNewSession(for: focused, using: remoteSrc, style: .terminal)
-                        }))
-                    items.append(
-                      .init(
-                        kind: .action(title: "\(remoteName) with iTerm2") {
-                          launchNewSession(for: focused, using: remoteSrc, style: .iterm)
-                        }))
-                    items.append(
-                      .init(
-                        kind: .action(title: "\(remoteName) with Warp") {
-                          launchNewSession(for: focused, using: remoteSrc, style: .warp)
-                        }))
+                  providerItems.append(.init(kind: .separator))
+                  for host in enabledRemoteHosts {
+                    let remote = remoteSource(for: base, host: host)
+                    providerItems.append(
+                      .init(kind: .submenu(title: host, items: launchItems(for: remote)))
+                    )
                   }
                 }
+                menuItems.append(.init(kind: .submenu(title: base.displayName, items: providerItems)))
               }
-              return items
+
+              if menuItems.isEmpty {
+                let fallbackSource = focused.source
+                menuItems.append(
+                  .init(kind: .submenu(title: fallbackSource.branding.displayName,
+                    items: launchItems(for: fallbackSource))))
+              }
+              return menuItems
             }()
           )
         }

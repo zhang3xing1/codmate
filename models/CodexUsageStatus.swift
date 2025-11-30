@@ -69,14 +69,16 @@ extension CodexUsageStatus {
 
     var primaryUsageText: String? {
         guard let percent = primaryWindowUsedPercent, let minutes = primaryWindowMinutes else { return nil }
-        let usedMinutes = percent / 100.0 * Double(minutes)
-        return "Used \(UsageDurationFormatter.string(minutes: usedMinutes))"
+        let usedMinutes = max(0, min(percent, 100)) / 100.0 * Double(minutes)
+        let remainingMinutes = max(0, Double(minutes) - usedMinutes)
+        return "\(UsageDurationFormatter.string(minutes: remainingMinutes)) remaining"
     }
 
     var secondaryUsageText: String? {
         guard let percent = secondaryWindowUsedPercent, let minutes = secondaryWindowMinutes else { return nil }
-        let usedMinutes = percent / 100.0 * Double(minutes)
-        return "Used \(UsageDurationFormatter.string(minutes: usedMinutes))"
+        let usedMinutes = max(0, min(percent, 100)) / 100.0 * Double(minutes)
+        let remainingMinutes = max(0, Double(minutes) - usedMinutes)
+        return "\(UsageDurationFormatter.string(minutes: remainingMinutes)) remaining"
     }
 
     var contextProgress: Double? { contextUsedPercent }
@@ -113,7 +115,7 @@ extension CodexUsageStatus {
                 usageText: primaryUsageText,
                 percentText: primaryPercentText,
                 progress: primaryProgress,
-                resetDate: primaryResetAt,
+                resetDate: validPrimaryResetAt,
                 fallbackWindowMinutes: primaryWindowMinutes
             )
         )
@@ -125,7 +127,7 @@ extension CodexUsageStatus {
                 usageText: secondaryUsageText,
                 percentText: secondaryPercentText,
                 progress: secondaryProgress,
-                resetDate: secondaryResetAt,
+                resetDate: validSecondaryResetAt,
                 fallbackWindowMinutes: secondaryWindowMinutes
             )
         )
@@ -153,6 +155,16 @@ extension CodexUsageStatus {
             secondaryWindowMinutes: snapshot.secondaryWindowMinutes,
             secondaryResetAt: snapshot.secondaryResetAt
         )
+    }
+
+    private var validPrimaryResetAt: Date? {
+        guard let reset = primaryResetAt else { return nil }
+        return reset > updatedAt ? reset : nil
+    }
+
+    private var validSecondaryResetAt: Date? {
+        guard let reset = secondaryResetAt else { return nil }
+        return reset > updatedAt ? reset : nil
     }
 }
 

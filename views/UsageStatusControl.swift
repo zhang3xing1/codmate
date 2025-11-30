@@ -36,7 +36,6 @@ struct UsageStatusControl: View {
       let rows = providerRows(at: referenceDate)
       let outerState = ringState(for: .claude, relativeTo: referenceDate)
       let innerState = ringState(for: .codex, relativeTo: referenceDate)
-      let snapshotForButton = snapshots[selectedProvider] ?? snapshots.values.first
 
       Button {
         showPopover.toggle()
@@ -232,7 +231,7 @@ private struct UsageStatusPopover: View {
     .frame(width: 300)
     .focusable(false)
     .onAppear { maybeTriggerClaudeAutoRefresh(now: Date()) }
-    .onChange(of: snapshots[.claude]?.updatedAt ?? nil) { _ in
+    .onChange(of: snapshots[.claude]?.updatedAt ?? nil) { _, _ in
       maybeTriggerClaudeAutoRefresh(now: Date())
     }
     .onDisappear { didTriggerClaudeAutoRefresh = false }

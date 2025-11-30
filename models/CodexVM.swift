@@ -77,6 +77,8 @@ final class CodexVM: ObservableObject {
   private var debounceSysNotifTask: Task<Void, Never>? = nil
   private var debounceHideReasoningTask: Task<Void, Never>? = nil
   private var debounceShowReasoningTask: Task<Void, Never>? = nil
+  private var debounceSandboxTask: Task<Void, Never>? = nil
+  private var debounceApprovalTask: Task<Void, Never>? = nil
   // Preset helper
   enum ProviderPreset { case k2, glm, deepseek }
   @Published var providerKeyApplyURL: String? = nil
@@ -168,6 +170,18 @@ final class CodexVM: ObservableObject {
       guard let self else { return }
       await self.applyShowRawReasoning()
     }
+  }
+  func scheduleApplySandboxDebounced() {
+      schedule(&debounceSandboxTask) { [weak self] in
+          guard let self else { return }
+          await self.applySandbox()
+      }
+  }
+  func scheduleApplyApprovalDebounced() {
+      schedule(&debounceApprovalTask) { [weak self] in
+          guard let self else { return }
+          await self.applyApproval()
+      }
   }
 
   func presentAddProvider() {

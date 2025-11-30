@@ -158,10 +158,14 @@ struct CodexSettingsView: View {
                                 Text("Default sandbox for sessions launched from CodMate only.")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
-                            Picker("", selection: $preferences.defaultResumeSandboxMode) {
+                            Picker("", selection: $codexVM.sandboxMode) {
                                 ForEach(SandboxMode.allCases) { Text($0.title).tag($0) }
                             }
                             .labelsHidden()
+                            .onChange(of: codexVM.sandboxMode) { _, newValue in
+                                codexVM.scheduleApplySandboxDebounced()
+                                preferences.defaultResumeSandboxMode = newValue
+                            }
                             .frame(maxWidth: .infinity, alignment: .trailing)
                         }
                         gridDivider
@@ -171,10 +175,14 @@ struct CodexSettingsView: View {
                                 Text("Default approval prompts for sessions launched from CodMate only.")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
-                            Picker("", selection: $preferences.defaultResumeApprovalPolicy) {
+                            Picker("", selection: $codexVM.approvalPolicy) {
                                 ForEach(ApprovalPolicy.allCases) { Text($0.title).tag($0) }
                             }
                             .labelsHidden()
+                            .onChange(of: codexVM.approvalPolicy) { _, newValue in
+                                codexVM.scheduleApplyApprovalDebounced()
+                                preferences.defaultResumeApprovalPolicy = newValue
+                            }
                             .frame(maxWidth: .infinity, alignment: .trailing)
                         }
                         gridDivider

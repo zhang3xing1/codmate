@@ -7,6 +7,7 @@ struct SettingsView: View {
   @ObservedObject var preferences: SessionPreferencesStore
   @Binding private var selectedCategory: SettingCategory
   @StateObject private var codexVM = CodexVM()
+  @StateObject private var geminiVM = GeminiVM()
   @StateObject private var claudeVM = ClaudeCodeVM()
   @EnvironmentObject private var viewModel: SessionListViewModel
   @ObservedObject private var permissionsManager = SandboxPermissionsManager.shared
@@ -130,6 +131,8 @@ struct SettingsView: View {
       ProvidersSettingsView()
     case .codex:
       codexSettings
+    case .gemini:
+      geminiSettings
     case .remoteHosts:
       RemoteHostsSettingsPane(preferences: preferences)
     case .gitReview:
@@ -416,6 +419,12 @@ struct SettingsView: View {
   private var codexSettings: some View {
     settingsScroll {
       CodexSettingsView(codexVM: codexVM, preferences: preferences)
+    }
+  }
+
+  private var geminiSettings: some View {
+    settingsScroll {
+      GeminiSettingsView(vm: geminiVM, preferences: preferences)
     }
   }
 

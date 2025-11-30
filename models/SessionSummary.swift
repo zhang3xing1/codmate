@@ -162,6 +162,8 @@ struct SessionSummary: Identifiable, Hashable, Sendable, Codable {
 extension SessionSummary {
     func overridingSource(_ newSource: SessionSource, remotePath: String? = nil) -> SessionSummary {
         if newSource == source, remotePath == self.remotePath { return self }
+        let adjustedModel = (newSource.baseKind == source.baseKind) ? model : nil
+        let adjustedApproval = (newSource.baseKind == source.baseKind) ? approvalPolicy : nil
         return SessionSummary(
             id: id,
             fileURL: fileURL,
@@ -173,8 +175,8 @@ extension SessionSummary {
             cwd: cwd,
             originator: originator,
             instructions: instructions,
-            model: model,
-            approvalPolicy: approvalPolicy,
+            model: adjustedModel,
+            approvalPolicy: adjustedApproval,
             userMessageCount: userMessageCount,
             assistantMessageCount: assistantMessageCount,
             toolInvocationCount: toolInvocationCount,

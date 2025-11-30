@@ -32,6 +32,7 @@ actor SessionRipgrepStore {
     }
 
     private let logger = Logger(subsystem: "io.umate.codmate", category: "RipgrepStore")
+    private let verboseLoggingEnabled = ProcessInfo.processInfo.environment["CODMATE_TRACE_RIPGREP"] == "1"
     private let decoder = FlexibleDecoders.iso8601Flexible()
     private let disk = RipgrepDiskCache()
     private let isoFormatterWithFractional: ISO8601DateFormatter = {
@@ -89,7 +90,7 @@ actor SessionRipgrepStore {
         }
 
         // Log cache performance
-        if !sessions.isEmpty {
+        if verboseLoggingEnabled && !sessions.isEmpty {
             logger.debug("Coverage cache: \(cacheHits, privacy: .public) hits, \(needScan.count, privacy: .public) misses for \(monthKey, privacy: .public)")
         }
 
@@ -359,7 +360,9 @@ actor SessionRipgrepStore {
 
         lastCoverageScan = Date()
         let elapsed = -start.timeIntervalSinceNow
-        logger.debug("Batch scanned \(sessions.count, privacy: .public) files (\(batches.count, privacy: .public) batches) for \(monthKey, privacy: .public) in \(elapsed, format: .fixed(precision: 3))s")
+        if verboseLoggingEnabled {
+            logger.debug("Batch scanned \(sessions.count, privacy: .public) files (\(batches.count, privacy: .public) batches) for \(monthKey, privacy: .public) in \(elapsed, format: .fixed(precision: 3))s")
+        }
 
         return allResults
     }
@@ -422,7 +425,9 @@ actor SessionRipgrepStore {
 
         lastToolScan = Date()
         let elapsed = -start.timeIntervalSinceNow
-        logger.debug("Batch scanned \(sessions.count, privacy: .public) files (\(batches.count, privacy: .public) batches) for tool invocations in \(elapsed, format: .fixed(precision: 3))s")
+        if verboseLoggingEnabled {
+            logger.debug("Batch scanned \(sessions.count, privacy: .public) files (\(batches.count, privacy: .public) batches) for tool invocations in \(elapsed, format: .fixed(precision: 3))s")
+        }
 
         return allResults
     }

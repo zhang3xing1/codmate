@@ -92,37 +92,44 @@ actor ProjectsStore {
     init(paths: Paths = .default(), fileManager: FileManager = .default) {
         self.fm = fileManager
         self.paths = paths
+        
         // Before creating new directories, attempt legacy migration from ~/.codex/projects → ~/.codmate/projects
-        Self.migrateLegacyIfNeeded(to: paths, fm: fm)
-        try? fm.createDirectory(at: paths.metadataDir, withIntermediateDirectories: true)
-        // Load memberships
+        Self.migrateLegacyIfNeeded(to: paths, fm: fileManager)
+        try? fileManager.createDirectory(at: paths.metadataDir, withIntermediateDirectories: true)
+        
+        // Load memberships - use local variables to avoid actor isolation issues
+        var loadedSessionToProject: [String: String] = [:]
         if let data = try? Data(contentsOf: paths.membershipsURL),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         {
             let map = obj["sessionToProject"] as? [String: String] ?? [:]
             let version = obj["version"] as? Int ?? 1
             if version >= 2 {
-                self.sessionToProject = map
+                loadedSessionToProject = map
             } else {
                 // Legacy keys did not encode the session source; assume Codex
-                self.sessionToProject = map.reduce(into: [:]) { result, entry in
-                    let legacyKey = membershipKey(for: entry.key, source: .codex)
+                loadedSessionToProject = map.reduce(into: [:]) { result, entry in
+                    let legacyKey = Self.makeMembershipKey(for: entry.key, source: .codex)
                     result[legacyKey] = entry.value
                 }
             }
         }
-        // Load metadata
-        if let en = fm.enumerator(at: paths.metadataDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+        self.sessionToProject = loadedSessionToProject
+        
+        // Load metadata - use local variable to avoid actor isolation issues
+        var loadedProjects: [String: ProjectMeta] = [:]
+        if let en = fileManager.enumerator(at: paths.metadataDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
             let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
             for case let url as URL in en {
                 if url.pathExtension.lowercased() != "json" { continue }
                 if let data = try? Data(contentsOf: url),
                    let meta = try? dec.decode(ProjectMeta.self, from: data)
                 {
-                    self.projects[meta.id] = meta
+                    loadedProjects[meta.id] = meta
                 }
             }
         }
+        self.projects = loadedProjects
     }
 
     // MARK: - Public API
@@ -164,6 +171,10 @@ actor ProjectsStore {
     }
 
     private func membershipKey(for id: String, source: ProjectSessionSource) -> String {
+        Self.makeMembershipKey(for: id, source: source)
+    }
+    
+    private static func makeMembershipKey(for id: String, source: ProjectSessionSource) -> String {
         return "\(source.rawValue)|\(id)"
     }
 

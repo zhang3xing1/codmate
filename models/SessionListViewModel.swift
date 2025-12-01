@@ -314,6 +314,13 @@ final class SessionListViewModel: ObservableObject {
   var projectMemberships: [String: String] = [:]
   var projectMembershipsVersion: UInt64 = 0
   var projectStructureVersion: UInt64 = 0  // Incremented when projects/parentIds change
+  @Published var expandedProjectIDs: Set<String> = [] {
+    didSet {
+      if oldValue != expandedProjectIDs {
+        windowStateStore.saveProjectExpansions(expandedProjectIDs)
+      }
+    }
+  }
 
   struct ProjectAggregatedKey: Equatable {
     var visibleKey: ProjectVisibleKey
@@ -578,6 +585,7 @@ final class SessionListViewModel: ObservableObject {
     // Restore project selection and workspace mode
     self.selectedProjectIDs = windowStateStore.restoreProjectSelection()
     self.projectWorkspaceMode = windowStateStore.restoreWorkspaceMode()
+    self.expandedProjectIDs = windowStateStore.restoreProjectExpansions()
 
     suppressFilterNotifications = false
 

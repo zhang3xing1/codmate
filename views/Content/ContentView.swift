@@ -62,6 +62,7 @@ struct ContentView: View {
   @State var searchPopoverSize: CGSize = ContentView.defaultSearchPopoverSize
   @State var shouldBlockAutoSelection = false
   @State var popoverDismissDisabled = false
+  @StateObject var overviewViewModel: AllOverviewViewModel
   static let defaultSearchPopoverSize = CGSize(width: 440, height: 320)
   static let searchPopoverMinSize = CGSize(width: 380, height: 220)
   static let searchPopoverMaxSize = CGSize(width: 640, height: 520)
@@ -174,6 +175,9 @@ struct ContentView: View {
         preferences: viewModel.preferences,
         sessionListViewModel: viewModel
       )
+    )
+    _overviewViewModel = StateObject(
+      wrappedValue: AllOverviewViewModel(sessionListViewModel: viewModel)
     )
   }
 

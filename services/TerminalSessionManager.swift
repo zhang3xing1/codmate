@@ -23,18 +23,17 @@ import Foundation
         try? FileManager.default.createDirectory(at: zdotdir, withIntermediateDirectories: true)
 
         let zshenvURL = zdotdir.appendingPathComponent(".zshenv", isDirectory: false)
-        if !FileManager.default.fileExists(atPath: zshenvURL.path) {
-          let content = """
-            # CodMate App Store sandbox bootstrap
-            # Ensure Homebrew and system paths are available to embedded zsh
-            export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-            export LANG="${LANG:-zh_CN.UTF-8}"
-            export LC_ALL="${LC_ALL:-zh_CN.UTF-8}"
-            export LC_CTYPE="${LC_CTYPE:-zh_CN.UTF-8}"
-            export TERM="${TERM:-xterm-256color}"
-            """
-          try? content.write(to: zshenvURL, atomically: true, encoding: .utf8)
-        }
+        // Always overwrite to ensure latest paths (like .bun) are available
+        let content = """
+          # CodMate App Store sandbox bootstrap
+          # Ensure Homebrew and system paths are available to embedded zsh
+          export PATH="$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+          export LANG="${LANG:-zh_CN.UTF-8}"
+          export LC_ALL="${LC_ALL:-zh_CN.UTF-8}"
+          export LC_CTYPE="${LC_CTYPE:-zh_CN.UTF-8}"
+          export TERM="${TERM:-xterm-256color}"
+          """
+        try? content.write(to: zshenvURL, atomically: true, encoding: .utf8)
 
         let zshrcURL = zdotdir.appendingPathComponent(".zshrc", isDirectory: false)
         if !FileManager.default.fileExists(atPath: zshrcURL.path) {
@@ -64,7 +63,7 @@ import Foundation
   @MainActor
   final class TerminalSessionManager {
     static let shared = TerminalSessionManager()
-    static let standardExecutablePrefix = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    static let standardExecutablePrefix = "$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
     // Keyed by terminalKey (not session id). Allows multiple panes per session.
     private var views: [String: LocalProcessTerminalView] = [:]
     private var bootstrapped: Set<String> = []
@@ -604,7 +603,12 @@ import Foundation
         envPATH.isEmpty ? standardExecutablePrefix : standardExecutablePrefix + ":" + envPATH
       for raw in combined.split(separator: ":") {
         guard !raw.isEmpty else { continue }
-        let dir = String(raw)
+        var dir = String(raw)
+        if dir.hasPrefix("~") {
+          dir = (dir as NSString).expandingTildeInPath
+        } else if dir.hasPrefix("$HOME") {
+          dir = dir.replacingOccurrences(of: "$HOME", with: NSHomeDirectory())
+        }
         let candidate = (dir as NSString).appendingPathComponent(name)
         if fm.isExecutableFile(atPath: candidate) {
           return true

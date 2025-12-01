@@ -10,7 +10,6 @@ struct ProjectsListView: View {
   @State private var newParentProject: Project? = nil
   @State private var pendingDelete: Project? = nil
   @State private var showDeleteConfirm = false
-  @State private var expandedProjects: Set<String> = []
   @State private var draftTaskForNew: CodMateTask? = nil
 
   var body: some View {
@@ -19,6 +18,11 @@ struct ProjectsListView: View {
     let selectionBinding: Binding<Set<String>> = Binding(
       get: { viewModel.selectedProjectIDs },
       set: { viewModel.setSelectedProjects($0) }
+    )
+
+    let expandedBinding = Binding(
+      get: { viewModel.expandedProjectIDs },
+      set: { viewModel.expandedProjectIDs = $0 }
     )
 
     return List(selection: selectionBinding) {
@@ -30,7 +34,7 @@ struct ProjectsListView: View {
             node: node,
             countsDisplay: countsDisplay,
             displayName: displayName(_:),
-            expanded: $expandedProjects,
+            expanded: expandedBinding,
             onTap: { handleSelection(for: $0) },
             onDoubleTap: {
               editingProject = $0
@@ -115,13 +119,15 @@ struct ProjectsListView: View {
       return false
     }
     .onAppear {
-      if expandedProjects.isEmpty {
-        expandedProjects = Set(tree.map(\.id))
+      if viewModel.expandedProjectIDs.isEmpty {
+        viewModel.expandedProjectIDs = Set(tree.map(\.id))
       }
     }
     .onReceive(NotificationCenter.default.publisher(for: .codMateExpandProjectTree)) { note in
       if let ids = note.userInfo?["ids"] as? [String] {
-        expandedProjects.formUnion(ids)
+        var merged = viewModel.expandedProjectIDs
+        merged.formUnion(ids)
+        viewModel.expandedProjectIDs = merged
       }
     }
     .sheet(isPresented: $showEdit) {

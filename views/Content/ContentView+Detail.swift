@@ -120,8 +120,17 @@ extension ContentView {
 
   @ViewBuilder
   func projectOverviewContent() -> some View {
-    // Placeholder for Overview — when All/Other selected, show a blank gentle surface
-    placeholderSurface(title: "Overview", systemImage: "square.grid.2x2")
+    if viewModel.selectedProjectIDs.isEmpty {
+      AllOverviewView(
+        viewModel: overviewViewModel,
+        onSelectSession: { focusSessionFromOverview($0) },
+        onResumeSession: { resumeFromList($0) },
+        onFocusToday: { focusTodayFromOverview() },
+        onSelectProject: { focusProjectFromOverview(id: $0) }
+      )
+    } else {
+      placeholderSurface(title: "Overview", systemImage: "square.grid.2x2")
+    }
   }
 
   @ViewBuilder
@@ -146,5 +155,29 @@ extension ContentView {
       Spacer(minLength: 0)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  func focusSessionFromOverview(_ summary: SessionSummary) {
+    let explicitProjectId = viewModel.projectIdForSession(summary.id)
+    focusOnSession(summary, explicitProjectId: explicitProjectId, searchTerm: nil, filterConversation: false)
+  }
+
+  func focusTodayFromOverview() {
+    let calendar = Calendar.current
+    let today = calendar.startOfDay(for: Date())
+    viewModel.selectedDay = today
+    viewModel.selectedDays = [today]
+    viewModel.setSidebarMonthStart(today)
+    isListHidden = false
+  }
+
+  func focusProjectFromOverview(id: String) {
+    viewModel.setSelectedProject(id)
+    isListHidden = false
+    if id == SessionListViewModel.otherProjectId {
+      viewModel.projectWorkspaceMode = .sessions
+    } else if viewModel.projectWorkspaceMode == .overview {
+      viewModel.projectWorkspaceMode = .tasks
+    }
   }
 }

@@ -6,6 +6,7 @@ enum CLIEnvironment {
     /// - Includes: ~/.local/bin (claude), /opt/homebrew/bin (codex on M1),
     ///   /usr/local/bin (codex on Intel), and standard system paths
     static let standardPathComponents = [
+        "$HOME/.bun/bin",
         "$HOME/.local/bin",
         "/opt/homebrew/bin",
         "/usr/local/bin",

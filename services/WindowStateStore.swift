@@ -17,6 +17,7 @@ final class WindowStateStore: ObservableObject {
     static let selectionPrimaryId = "codmate.window.selectionPrimaryId"
     static let contentColumnWidth = "codmate.window.contentColumnWidth"
     static let reviewLeftPaneWidth = "codmate.window.reviewLeftPaneWidth"
+    static let expandedProjects = "codmate.window.expandedProjects"
   }
 
   init(defaults: UserDefaults = .standard) {
@@ -152,6 +153,17 @@ final class WindowStateStore: ObservableObject {
     return (selectedIDs, primaryId)
   }
 
+  func saveProjectExpansions(_ ids: Set<String>) {
+    defaults.set(Array(ids), forKey: Keys.expandedProjects)
+  }
+
+  func restoreProjectExpansions() -> Set<String> {
+    guard let array = defaults.array(forKey: Keys.expandedProjects) as? [String] else {
+      return []
+    }
+    return Set(array)
+  }
+
   // MARK: - Clear State
 
   func clearAll() {
@@ -165,5 +177,6 @@ final class WindowStateStore: ObservableObject {
     defaults.removeObject(forKey: Keys.reviewLeftPaneWidth)
     defaults.removeObject(forKey: Keys.selectedSessionIDs)
     defaults.removeObject(forKey: Keys.selectionPrimaryId)
+    defaults.removeObject(forKey: Keys.expandedProjects)
   }
 }

@@ -213,6 +213,9 @@ struct SessionTimelineLoader {
         let deduped = collapseDuplicates(ordered)
 
         for event in deduped {
+            if event.title == TimelineEvent.environmentContextTitle {
+                continue
+            }
             if event.metadata?[turnBoundaryMetadataKey] == "1" {
                 if currentUser == nil {
                     flushTurn()

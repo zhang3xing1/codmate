@@ -96,20 +96,23 @@ extension GitChangesPanel {
                 .contextMenu {
                     if let dir = node.dirPath {
                         let allPaths = filePaths(under: dir)
-                        if scope == .staged {
-                            Button("Unstage Folder") { Task { await vm.unstage(paths: allPaths) } }
-                        } else {
-                            Button("Stage Folder") { Task { await vm.stage(paths: allPaths) } }
-                        }
+                    if scope == .staged {
+                        Button("Unstage Folder") { Task { await vm.unstage(paths: allPaths) } }
+                    } else {
+                        Button("Stage Folder") { Task { await vm.stage(paths: allPaths) } }
+                    }
 #if canImport(AppKit)
-                        Button("Reveal in Finder") {
-                            revealInFinder(path: dir, isDirectory: true)
-                        }
+                    Divider()
+                    Button("Copy Path") { copyAbsolutePath(dir) }
+                    Button("Copy Relative Path") { copyRelativePath(dir) }
+                    Button("Reveal in Finder") {
+                        revealInFinder(path: dir, isDirectory: true)
+                    }
 #endif
-                        if scope == .unstaged {
-                            Divider()
-                            Button("Discard Folder Changes…", role: .destructive) {
-                                pendingDiscardPaths = allPaths
+                    if scope == .unstaged {
+                        Divider()
+                        Button("Discard Folder Changes…", role: .destructive) {
+                            pendingDiscardPaths = allPaths
                                 pendingDiscardIncludesStaged = false
                                 showDiscardAlert = true
                             }
@@ -253,6 +256,9 @@ extension GitChangesPanel {
                     }
                     Button("Open with Default App") { NSWorkspace.shared.open(URL(fileURLWithPath: vm.repoRoot?.appendingPathComponent(path).path ?? path)) }
 #if canImport(AppKit)
+                    Divider()
+                    Button("Copy Path") { copyAbsolutePath(path) }
+                    Button("Copy Relative Path") { copyRelativePath(path) }
                     Button("Reveal in Finder") { revealInFinder(path: path, isDirectory: false) }
 #endif
                     if scope == .unstaged {
@@ -273,3 +279,22 @@ extension GitChangesPanel {
         return "\(prefix)::\(path)"
     }
 }
+
+#if canImport(AppKit)
+extension GitChangesPanel {
+    private func copyAbsolutePath(_ relativePath: String) {
+        let full = vm.repoRoot?.appendingPathComponent(relativePath).path ?? relativePath
+        writeToPasteboard(full)
+    }
+
+    private func copyRelativePath(_ relativePath: String) {
+        writeToPasteboard(relativePath)
+    }
+
+    private func writeToPasteboard(_ string: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(string, forType: .string)
+    }
+}
+#endif

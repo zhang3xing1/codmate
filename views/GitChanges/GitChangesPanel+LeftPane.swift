@@ -36,60 +36,25 @@ extension GitChangesPanel {
                     )
                     .frame(maxWidth: .infinity)
 
-                    // Collapse/Expand buttons
-                    HStack(spacing: 0) {
-                        // Collapse All button
-                        Button {
+                    // Collapse/Expand buttons (shared styling with Tasks column)
+                    CollapseExpandButtonGroup(
+                        onCollapse: {
                             if mode == .browser {
                                 expandedDirsBrowser.removeAll()
                             } else {
                                 expandedDirsStaged.removeAll()
                                 expandedDirsUnstaged.removeAll()
                             }
-                        } label: {
-                            Image(systemName: "arrow.up.right.and.arrow.down.left")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .frame(width: 28, height: 28)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.clear)
-                        )
-                        .contentShape(Rectangle())
-                        .onHover { hovering in
-                            if hovering {
-                            }
-                        }
-
-                        // (Graph toggle moved to header segmented control)
-
-                        // Expand All button
-                        Button {
+                        },
+                        onExpand: {
                             if mode == .browser {
                                 expandedDirsBrowser = Set(allDirectoryKeys(nodes: browserNodes))
                             } else {
                                 expandedDirsStaged = Set(allDirectoryKeys(nodes: cachedNodesStaged))
                                 expandedDirsUnstaged = Set(allDirectoryKeys(nodes: cachedNodesUnstaged))
                             }
-                        } label: {
-                            Image(systemName: "arrow.down.left.and.arrow.up.right")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.plain)
-                        .frame(width: 28, height: 28)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.clear)
-                        )
-                        .contentShape(Rectangle())
-                        .onHover { hovering in
-                            if hovering {
-                            }
-                        }
-                    }
+                    )
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }

@@ -215,15 +215,23 @@ extension ContentView {
           viewModel.reveal(session: focused)
         }
 
-        // Prompts (only when embedded terminal is running and Terminal tab is active)
-        if selectedDetailTab == .terminal, runningSessionIDs.contains(focused.id) {
+        // Prompts (insert into embedded terminal when available, fallback to clipboard copy)
+        let promptsMode: PromptsPopover.Mode? = {
+          if selectedDetailTab == .terminal {
+            guard runningSessionIDs.contains(focused.id) else { return nil }
+            return .insert(terminalKey: focused.id)
+          }
+          return .copy
+        }()
+
+        if let promptsMode {
           ChromedIconButton(systemImage: "text.insert", help: "Prompts") {
             showPromptPicker.toggle()
           }
           .popover(isPresented: $showPromptPicker) {
             PromptsPopover(
               workingDirectory: workingDirectory(for: focused),
-              terminalKey: focused.id,
+              mode: promptsMode,
               builtin: builtinPrompts(),
               query: $promptQuery,
               loaded: $loadedPrompts,
@@ -710,8 +718,23 @@ private struct ChromedIconButton: View {
 
 // MARK: - Prompts popover content
 private struct PromptsPopover: View {
+  enum Mode {
+    case insert(terminalKey: String)
+    case copy
+
+    var hint: String {
+      switch self {
+      case .insert:
+        return "Selecting a prompt inserts it into the embedded terminal."
+      case .copy:
+        return "Selecting a prompt copies it to the clipboard."
+      }
+    }
+
+  }
+
   let workingDirectory: String
-  let terminalKey: String
+  let mode: Mode
   let builtin: [PresetPromptsStore.Prompt]
   @Binding var query: String
   @Binding var loaded: [ContentView.SourcedPrompt]
@@ -736,6 +759,10 @@ private struct PromptsPopover: View {
         .buttonStyle(.plain)
         .help("Open prompts file")
       }
+      Text(mode.hint)
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
       TextField("Search or type a new command", text: $query)
         .textFieldStyle(.roundedBorder)
         .frame(width: 320)
@@ -777,13 +804,7 @@ private struct PromptsPopover: View {
               if inside { hovered = rowKey } else if hovered == rowKey { hovered = nil }
             }
             .onTapGesture {
-              #if canImport(SwiftTerm) && !APPSTORE
-                TerminalSessionManager.shared.send(to: terminalKey, text: sp.command)
-              #else
-                let pb = NSPasteboard.general
-                pb.clearContents()
-                pb.setString(sp.command, forType: .string)
-              #endif
+              handleSelection(sp.command)
               // Auto-dismiss popover after selecting a preset
               onDismiss()
             }
@@ -820,6 +841,30 @@ private struct PromptsPopover: View {
     case .user: return .user
     case .builtin: return .builtin
     }
+  }
+
+  private func handleSelection(_ value: String) {
+    switch mode {
+    case .insert(let terminalKey):
+      #if canImport(SwiftTerm) && !APPSTORE
+        TerminalSessionManager.shared.send(to: terminalKey, text: value)
+      #else
+        copyToClipboard(value)
+      #endif
+    case .copy:
+      copyToClipboard(value)
+      Task {
+        await SystemNotifier.shared.notify(
+          title: "CodMate",
+          body: "Prompt copied. Paste it into your terminal.")
+      }
+    }
+  }
+
+  private func copyToClipboard(_ value: String) {
+    let pb = NSPasteboard.general
+    pb.clearContents()
+    pb.setString(value, forType: .string)
   }
 
   private func filtered() -> [ContentView.SourcedPrompt] {

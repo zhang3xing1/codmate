@@ -102,4 +102,6 @@ extension Notification.Name {
   static let codMateQuickSearchFocusBlocked = Notification.Name("CodMate.QuickSearchFocusBlocked")
   static let codMateActiveProviderChanged = Notification.Name("CodMate.ActiveProviderChanged")
   static let codMateGlobalRefresh = Notification.Name("CodMate.GlobalRefresh")
+  static let codMateCollapseAllTasks = Notification.Name("CodMate.CollapseAllTasks")
+  static let codMateExpandAllTasks = Notification.Name("CodMate.ExpandAllTasks")
 }

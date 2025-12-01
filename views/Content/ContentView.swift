@@ -128,13 +128,7 @@ struct ContentView: View {
     return result
   }
   func builtinPrompts() -> [PresetPromptsStore.Prompt] {
-    [
-      .init(label: "git status", command: "git status"),
-      .init(label: "git pull --rebase --autostash", command: "git pull --rebase --autostash"),
-      .init(label: "rg -n TODO", command: "rg -n TODO"),
-      .init(label: "swift build", command: "swift build"),
-      .init(label: "swift test", command: "swift test"),
-    ]
+    []
   }
   func makeSidebarActions() -> SidebarActions {
     SidebarActions(

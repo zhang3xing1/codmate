@@ -141,6 +141,14 @@ struct TaskListView: View {
         await workspaceVM.loadTasks(for: projectId)
       }
     }
+    .onReceive(NotificationCenter.default.publisher(for: .codMateCollapseAllTasks)) { note in
+      guard shouldHandleTaskNotification(note) else { return }
+      collapsedTaskIDs = taskIDsForCurrentProject()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .codMateExpandAllTasks)) { note in
+      guard shouldHandleTaskNotification(note) else { return }
+      collapsedTaskIDs.removeAll()
+    }
     .confirmationDialog(
       "Delete Task",
       isPresented: $showDeleteConfirmation,
@@ -721,6 +729,19 @@ struct TaskListView: View {
       let rDate = rhs.lastUpdatedAt ?? rhs.startedAt
       return lDate < rDate
     })
+  }
+}
+
+private extension TaskListView {
+  func shouldHandleTaskNotification(_ note: Notification) -> Bool {
+    guard let target = note.userInfo?["projectId"] as? String else { return true }
+    return target == currentProjectId
+  }
+
+  func taskIDsForCurrentProject() -> Set<UUID> {
+    guard let projectId = currentProjectId else { return [] }
+    let ids = workspaceVM.tasks.filter { $0.projectId == projectId }.map { $0.id }
+    return Set(ids)
   }
 }
 

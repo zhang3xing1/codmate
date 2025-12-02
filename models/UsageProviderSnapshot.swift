@@ -3,6 +3,7 @@ import Foundation
 enum UsageProviderKind: String, CaseIterable, Identifiable {
   case codex
   case claude
+  case gemini
 
   var id: String { rawValue }
 
@@ -10,6 +11,7 @@ enum UsageProviderKind: String, CaseIterable, Identifiable {
     switch self {
     case .codex: return "Codex"
     case .claude: return "Claude"
+    case .gemini: return "Gemini"
     }
   }
 
@@ -17,12 +19,13 @@ enum UsageProviderKind: String, CaseIterable, Identifiable {
     switch self {
     case .codex: return "accentColor"
     case .claude: return "purple"
+    case .gemini: return "teal"
     }
   }
 }
 
 struct UsageMetricSnapshot: Identifiable, Equatable {
-  enum Kind { case context, fiveHour, weekly, sessionExpiry, snapshot }
+  enum Kind { case context, fiveHour, weekly, sessionExpiry, quota, snapshot }
 
   let id = UUID()
   let kind: Kind
@@ -86,6 +89,12 @@ struct UsageProviderSnapshot: Identifiable, Equatable {
       metrics
       .filter { $0.kind != .snapshot && $0.kind != .context }
       .sorted(by: { a, b in
+        // For quota-style metrics, prioritize the lowest remaining fraction first.
+        if a.kind == .quota && b.kind == .quota {
+          let ap = a.progress ?? 1
+          let bp = b.progress ?? 1
+          if ap != bp { return ap < bp }
+        }
         switch (a.priorityDate, b.priorityDate) {
         case (let lhs?, let rhs?): return lhs < rhs
         case (_?, nil): return true

@@ -322,7 +322,7 @@ struct ClaudeUsageAPIClient {
     }
 }
 
-private extension Bundle {
+extension Bundle {
     var shortVersionString: String {
         infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
     }

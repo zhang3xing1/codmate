@@ -56,6 +56,12 @@ struct EquatableUsageContainer: View, Equatable {
     var claudeUrgentReset: TimeInterval?
     var claudeOrigin: Int
     var claudeStatusHash: Int
+    var geminiUpdatedAt: TimeInterval?
+    var geminiAvailability: Int
+    var geminiUrgentProgress: Double?
+    var geminiUrgentReset: TimeInterval?
+    var geminiOrigin: Int
+    var geminiStatusHash: Int
   }
 
   static func == (lhs: EquatableUsageContainer, rhs: EquatableUsageContainer) -> Bool {
@@ -114,6 +120,7 @@ struct EquatableUsageContainer: View, Equatable {
     }
     let cdx = parts(for: .codex)
     let cld = parts(for: .claude)
+    let gmn = parts(for: .gemini)
     return UsageDigest(
       codexUpdatedAt: cdx.0,
       codexAvailability: cdx.1,
@@ -126,7 +133,13 @@ struct EquatableUsageContainer: View, Equatable {
       claudeUrgentProgress: cld.2,
       claudeUrgentReset: cld.3,
       claudeOrigin: cld.4,
-      claudeStatusHash: cld.5
+      claudeStatusHash: cld.5,
+      geminiUpdatedAt: gmn.0,
+      geminiAvailability: gmn.1,
+      geminiUrgentProgress: gmn.2,
+      geminiUrgentReset: gmn.3,
+      geminiOrigin: gmn.4,
+      geminiStatusHash: gmn.5
     )
   }
 }

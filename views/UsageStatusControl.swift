@@ -35,14 +35,16 @@ struct UsageStatusControl: View {
     HStack(spacing: 8) {
       let rows = providerRows(at: referenceDate)
       let outerState = ringState(for: .claude, relativeTo: referenceDate)
-      let innerState = ringState(for: .codex, relativeTo: referenceDate)
+      let middleState = ringState(for: .codex, relativeTo: referenceDate)
+      let innerState = ringState(for: .gemini, relativeTo: referenceDate)
 
       Button {
         showPopover.toggle()
       } label: {
         HStack(spacing: isHovering ? 8 : 0) {
-          DualUsageDonutView(
+          TripleUsageDonutView(
             outerState: outerState,
+            middleState: middleState,
             innerState: innerState
           )
           VStack(alignment: .leading, spacing: 0) {
@@ -73,7 +75,7 @@ struct UsageStatusControl: View {
         .contentShape(Capsule(style: .continuous))
       }
       .buttonStyle(.plain)
-      .help("View Codex and Claude Code usage snapshots")
+      .help("View usage snapshots for Codex, Claude, and Gemini")
       .focusable(false)
       .onHover { hovering in
         withAnimation(.easeInOut(duration: 0.2)) { isHovering = hovering }
@@ -90,7 +92,8 @@ struct UsageStatusControl: View {
 
   private var shouldHideAllProviders: Bool {
     UsageProviderKind.allCases.allSatisfy { provider in
-      snapshots[provider]?.origin == .thirdParty
+      guard let snapshot = snapshots[provider] else { return true }
+      return snapshot.origin == .thirdParty
     }
   }
 
@@ -145,6 +148,8 @@ struct UsageStatusControl: View {
       return Color.accentColor
     case .claude:
       return Color(nsColor: .systemPurple)
+    case .gemini:
+      return Color(nsColor: .systemTeal)
     }
   }
 
@@ -175,8 +180,9 @@ private struct UsageRingState {
   var disabled: Bool
 }
 
-private struct DualUsageDonutView: View {
+private struct TripleUsageDonutView: View {
   var outerState: UsageRingState
+  var middleState: UsageRingState
   var innerState: UsageRingState
 
   var body: some View {
@@ -184,33 +190,33 @@ private struct DualUsageDonutView: View {
       Circle()
         .stroke(Color.secondary.opacity(0.25), lineWidth: 4)
         .frame(width: 22, height: 22)
-      if outerState.disabled {
-        Circle()
-          .stroke(Color(nsColor: .quaternaryLabelColor), lineWidth: 4)
-          .frame(width: 22, height: 22)
-      } else if let outerProgress = outerState.progress {
-        Circle()
-          .trim(from: 0, to: CGFloat(max(0, min(outerProgress, 1))))
-          .stroke(style: StrokeStyle(lineWidth: 5, lineCap: .round))
-          .foregroundStyle(outerState.color)
-          .rotationEffect(.degrees(-90))
-          .frame(width: 22, height: 22)
-      }
+      ring(for: outerState, lineWidth: 5, size: 22)
+
+      Circle()
+        .stroke(Color.secondary.opacity(0.22), lineWidth: 4)
+        .frame(width: 16, height: 16)
+      ring(for: middleState, lineWidth: 4, size: 16)
+
       Circle()
         .stroke(Color.secondary.opacity(0.2), lineWidth: 4)
         .frame(width: 10, height: 10)
-      if innerState.disabled {
-        Circle()
-          .stroke(Color(nsColor: .quaternaryLabelColor), lineWidth: 4)
-          .frame(width: 10, height: 10)
-      } else if let innerProgress = innerState.progress {
-        Circle()
-          .trim(from: 0, to: CGFloat(max(0, min(innerProgress, 1))))
-          .stroke(style: StrokeStyle(lineWidth: 4, lineCap: .round))
-          .foregroundStyle(innerState.color)
-          .rotationEffect(.degrees(-90))
-          .frame(width: 10, height: 10)
-      }
+      ring(for: innerState, lineWidth: 4, size: 10)
+    }
+  }
+
+  @ViewBuilder
+  private func ring(for state: UsageRingState, lineWidth: CGFloat, size: CGFloat) -> some View {
+    if state.disabled {
+      Circle()
+        .stroke(Color(nsColor: .quaternaryLabelColor), lineWidth: lineWidth)
+        .frame(width: size, height: size)
+    } else if let progress = state.progress {
+      Circle()
+        .trim(from: 0, to: CGFloat(max(0, min(progress, 1))))
+        .stroke(style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+        .foregroundStyle(state.color)
+        .rotationEffect(.degrees(-90))
+        .frame(width: size, height: size)
     }
   }
 }
@@ -314,6 +320,7 @@ private struct UsageStatusPopover: View {
     switch provider {
     case .codex: return "ChatGPTIcon"
     case .claude: return "ClaudeIcon"
+    case .gemini: return nil
     }
   }
 
@@ -321,6 +328,7 @@ private struct UsageStatusPopover: View {
     switch provider {
     case .codex: return Color.accentColor
     case .claude: return Color(nsColor: .systemPurple)
+    case .gemini: return Color(nsColor: .systemTeal)
     }
   }
 }
@@ -472,7 +480,7 @@ private struct MetricDisplayState {
         return "\(minutes)m remaining"
       }
 
-    case .sessionExpiry:
+    case .sessionExpiry, .quota:
       let mins = minutes % 60
       if hours > 0 {
         return "\(hours)h \(mins)m remaining"

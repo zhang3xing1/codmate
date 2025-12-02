@@ -191,25 +191,10 @@ final class SessionListViewModel: ObservableObject {
     var membershipVersion: UInt64
   }
   var cachedProjectVisibleCounts: (key: ProjectVisibleKey, value: [String: Int])?
-  private var groupedSectionsCache: GroupedSectionsCache?
   private var geminiProjectPathByHash: [String: String] = [:]
-  struct GroupSessionsKey: Equatable {
-    var dimension: DateDimension
-    var sortOrder: SessionSortOrder
-  }
-  struct GroupSessionsDigest: Equatable {
-    var count: Int
-    var firstId: String?
-    var lastId: String?
-    var hashValue: Int
-  }
-  struct GroupedSectionsCache {
-    var key: GroupSessionsKey
-    var digest: GroupSessionsDigest
-    var sections: [SessionDaySection]
-  }
   private var codexUsageTask: Task<Void, Never>?
   private var claudeUsageTask: Task<Void, Never>?
+  private var geminiUsageTask: Task<Void, Never>?
   private var pathTreeRefreshTask: Task<Void, Never>?
   private var calendarRefreshTasks: [String: Task<Void, Never>] = [:]
   private var cancellables = Set<AnyCancellable>()
@@ -292,6 +277,7 @@ final class SessionListViewModel: ObservableObject {
   let claudeProvider = ClaudeSessionProvider()
   let geminiProvider: GeminiSessionProvider
   private let claudeUsageClient = ClaudeUsageAPIClient()
+  private let geminiUsageClient = GeminiUsageAPIClient()
   private let providersRegistry = ProvidersRegistryService()
   let remoteProvider = RemoteSessionProvider()
   @Published var projects: [Project] = []
@@ -635,6 +621,7 @@ final class SessionListViewModel: ObservableObject {
       guard let self else { return }
       let codexOrigin = await self.providerOrigin(for: .codex)
       let claudeOrigin = await self.providerOrigin(for: .claude)
+      let geminiOrigin = await self.providerOrigin(for: .gemini)
       await MainActor.run {
         if codexOrigin == .thirdParty {
           self.setUsageSnapshot(.codex, Self.thirdPartyUsageSnapshot(for: .codex))
@@ -644,6 +631,11 @@ final class SessionListViewModel: ObservableObject {
         } else {
           self.claudeUsageAutoRefreshEnabled = false
           self.setInitialClaudePlaceholder()
+        }
+        if geminiOrigin == .thirdParty {
+          self.setUsageSnapshot(.gemini, Self.thirdPartyUsageSnapshot(for: .gemini))
+        } else {
+          self.setInitialGeminiPlaceholder()
         }
       }
     }
@@ -843,6 +835,8 @@ final class SessionListViewModel: ObservableObject {
     quickPulseTask = nil
     codexUsageTask?.cancel()
     codexUsageTask = nil
+    geminiUsageTask?.cancel()
+    geminiUsageTask = nil
     pathTreeRefreshTask?.cancel()
     pathTreeRefreshTask = nil
     for task in calendarRefreshTasks.values { task.cancel() }
@@ -1409,12 +1403,8 @@ final class SessionListViewModel: ObservableObject {
       if !result.newCanonicalEntries.isEmpty {
         self.canonicalCwdCache.merge(result.newCanonicalEntries) { _, new in new }
       }
-      let sections = self.sectionsUsingCache(
-        result.filteredSessions,
-        dimension: snapshot.dateDimension,
-        sortOrder: snapshot.sortOrder
-      )
-      self.sections = sections
+      // Use pre-computed sections from background task
+      self.sections = result.sections
       self.filterTask = nil
     }
   }
@@ -1545,8 +1535,11 @@ final class SessionListViewModel: ObservableObject {
 
     filtered = snapshot.sortOrder.sort(filtered, dimension: snapshot.dateDimension)
 
+    let sections = Self.groupSessions(filtered, dimension: snapshot.dateDimension)
+
     return FilterComputationResult(
       filteredSessions: filtered,
+      sections: sections,
       newCanonicalEntries: newCanonicalEntries
     )
   }
@@ -1579,41 +1572,7 @@ final class SessionListViewModel: ObservableObject {
     return false
   }
 
-  private func sectionsUsingCache(
-    _ sessions: [SessionSummary],
-    dimension: DateDimension,
-    sortOrder: SessionSortOrder
-  ) -> [SessionDaySection] {
-    let key = GroupSessionsKey(dimension: dimension, sortOrder: sortOrder)
-    let digest = makeGroupSessionsDigest(for: sessions)
-    if let cache = groupedSectionsCache, cache.key == key, cache.digest == digest {
-      return cache.sections
-    }
-    let sections = Self.groupSessions(sessions, dimension: dimension)
-    groupedSectionsCache = GroupedSectionsCache(key: key, digest: digest, sections: sections)
-    return sections
-  }
 
-  private func makeGroupSessionsDigest(for sessions: [SessionSummary]) -> GroupSessionsDigest {
-    var hasher = Hasher()
-    for session in sessions {
-      hasher.combine(session.id)
-      hasher.combine(session.startedAt.timeIntervalSinceReferenceDate.bitPattern)
-      hasher.combine(
-        (session.lastUpdatedAt ?? session.startedAt).timeIntervalSinceReferenceDate.bitPattern)
-      hasher.combine(session.duration.bitPattern)
-      hasher.combine(session.eventCount)
-      // Include user-editable fields to invalidate cache when they change
-      hasher.combine(session.userTitle)
-      hasher.combine(session.userComment)
-    }
-    return GroupSessionsDigest(
-      count: sessions.count,
-      firstId: sessions.first?.id,
-      lastId: sessions.last?.id,
-      hashValue: hasher.finalize()
-    )
-  }
 
   nonisolated private static func referenceDate(
     for session: SessionSummary, dimension: DateDimension
@@ -1655,6 +1614,7 @@ final class SessionListViewModel: ObservableObject {
 
   private struct FilterComputationResult: Sendable {
     let filteredSessions: [SessionSummary]
+    let sections: [SessionDaySection]
     let newCanonicalEntries: [String: String]
   }
 
@@ -2314,11 +2274,17 @@ extension SessionListViewModel {
     case .claude:
       claudeUsageAutoRefreshEnabled = true
       refreshClaudeUsageStatus()
+    case .gemini:
+      refreshGeminiUsageStatus()
     }
   }
 
   private func setInitialClaudePlaceholder() {
     self.setClaudeUsagePlaceholder("Load Claude usage", action: .refresh)
+  }
+
+  private func setInitialGeminiPlaceholder() {
+    self.setGeminiUsagePlaceholder("Load Gemini usage", action: .refresh)
   }
 
   private func setClaudeUsagePlaceholder(
@@ -2338,6 +2304,25 @@ extension SessionListViewModel {
       action: action
     )
     setUsageSnapshot(.claude, snapshot)
+  }
+
+  private func setGeminiUsagePlaceholder(
+    _ message: String,
+    action: UsageProviderSnapshot.Action? = .refresh,
+    availability: UsageProviderSnapshot.Availability = .empty
+  ) {
+    let snapshot = UsageProviderSnapshot(
+      provider: .gemini,
+      title: UsageProviderKind.gemini.displayName,
+      availability: availability,
+      metrics: [],
+      updatedAt: nil,
+      statusMessage: message,
+      requiresReauth: false,
+      origin: .builtin,
+      action: action
+    )
+    setUsageSnapshot(.gemini, snapshot)
   }
 
   private func refreshCodexUsageStatus() {
@@ -2458,6 +2443,51 @@ extension SessionListViewModel {
     }
   }
 
+  private func refreshGeminiUsageStatus() {
+    geminiUsageTask?.cancel()
+    geminiUsageTask = Task { [weak self] in
+      guard let self else { return }
+      let origin = await self.providerOrigin(for: .gemini)
+      guard origin == .builtin else {
+        await MainActor.run {
+          self.setUsageSnapshot(.gemini, Self.thirdPartyUsageSnapshot(for: .gemini))
+        }
+        return
+      }
+      await MainActor.run {
+        self.setGeminiUsagePlaceholder("Refreshing …", action: nil, availability: .comingSoon)
+      }
+
+      do {
+        let status = try await self.geminiUsageClient.fetchUsageStatus()
+        guard !Task.isCancelled else { return }
+        await MainActor.run {
+          self.setUsageSnapshot(.gemini, status.asProviderSnapshot())
+        }
+      } catch {
+        NSLog("[GeminiUsage] API fetch failed: \(error)")
+        guard !Task.isCancelled else { return }
+        let descriptor = Self.geminiUsageErrorState(from: error)
+        await MainActor.run {
+          self.setUsageSnapshot(
+            .gemini,
+            UsageProviderSnapshot(
+              provider: .gemini,
+              title: UsageProviderKind.gemini.displayName,
+              availability: .empty,
+              metrics: [],
+              updatedAt: nil,
+              statusMessage: descriptor.message,
+              requiresReauth: descriptor.requiresReauth,
+              origin: .builtin,
+              action: descriptor.action
+            )
+          )
+        }
+      }
+    }
+  }
+
   private struct ClaudeUsageErrorDescriptor {
     var message: String
     var requiresReauth: Bool
@@ -2520,6 +2550,73 @@ extension SessionListViewModel {
     }
   }
 
+  private struct GeminiUsageErrorDescriptor {
+    var message: String
+    var requiresReauth: Bool
+    var action: UsageProviderSnapshot.Action?
+  }
+
+  private static func geminiUsageErrorState(from error: Error) -> GeminiUsageErrorDescriptor {
+    guard let clientError = error as? GeminiUsageAPIClient.ClientError else {
+      return GeminiUsageErrorDescriptor(
+        message: "Unable to get Gemini usage.",
+        requiresReauth: false,
+        action: .refresh
+      )
+    }
+
+    switch clientError {
+    case .credentialNotFound:
+      return GeminiUsageErrorDescriptor(
+        message: "Not logged in to Gemini. Run gemini CLI to refresh and retry.",
+        requiresReauth: true,
+        action: .refresh
+      )
+    case .keychainAccess(let status):
+      return GeminiUsageErrorDescriptor(
+        message: SecCopyErrorMessageString(status, nil) as String? ?? "Keychain access denied.",
+        requiresReauth: false,
+        action: .authorizeKeychain
+      )
+    case .malformedCredential, .missingAccessToken:
+      return GeminiUsageErrorDescriptor(
+        message: "Gemini login info is invalid. Please log in again.",
+        requiresReauth: true,
+        action: .refresh
+      )
+    case .credentialExpired(let date):
+      let formatter = DateFormatter()
+      formatter.dateStyle = .medium
+      formatter.timeStyle = .short
+      return GeminiUsageErrorDescriptor(
+        message: "Gemini login expired on \(formatter.string(from: date)).",
+        requiresReauth: true,
+        action: .refresh
+      )
+    case .projectNotFound:
+      return GeminiUsageErrorDescriptor(
+        message: "Gemini project not found. Run gemini login or set GOOGLE_CLOUD_PROJECT.",
+        requiresReauth: true,
+        action: .refresh
+      )
+    case .requestFailed(let code):
+      let needsLogin = code == 401 || code == 403
+      return GeminiUsageErrorDescriptor(
+        message: needsLogin
+          ? "Gemini rejected the usage request. Please log in again."
+          : "Gemini usage request failed (HTTP \(code)).",
+        requiresReauth: needsLogin,
+        action: .refresh
+      )
+    case .emptyResponse, .decodingFailed:
+      return GeminiUsageErrorDescriptor(
+        message: "Unable to parse Gemini usage temporarily. Please try again later.",
+        requiresReauth: false,
+        action: .refresh
+      )
+    }
+  }
+
   private func setUsageSnapshot(_ provider: UsageProviderKind, _ new: UsageProviderSnapshot) {
     if let old = usageSnapshots[provider], Self.usageSnapshotCoreEqual(old, new) {
       return
@@ -2546,10 +2643,15 @@ extension SessionListViewModel {
   }
 
   private func providerOrigin(for provider: UsageProviderKind) async -> UsageProviderOrigin {
+    if provider == .gemini {
+      // Gemini usage is always treated as built-in; no third-party override today.
+      return .builtin
+    }
     let consumer: ProvidersRegistryService.Consumer = {
       switch provider {
       case .codex: return .codex
       case .claude: return .claudeCode
+      case .gemini: return .codex
       }
     }()
     let bindings = await providersRegistry.getBindings()

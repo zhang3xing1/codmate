@@ -88,65 +88,27 @@ actor GitService {
         return Repo(root: URL(fileURLWithPath: raw, isDirectory: true))
     }
 
-    // Aggregate staged/unstaged/untracked status. Prefer name-status to preserve kind when cheap.
+    // Aggregate staged/unstaged/untracked status. Optimized to use a single git call.
     func status(in repo: Repo) async -> [Change] {
-        // Parse name-status for both staged and unstaged; fall back to name-only semantics if parsing fails
-        let stagedMap: [String: Change.Kind]
-        if let out = try? await runGit(["diff", "--name-status", "--cached", "-z"], cwd: repo.root) {
-            stagedMap = Self.parseNameStatusZ(out.stdout)
-        } else {
-            stagedMap = [:]
+        // Use status --porcelain=v1 -z which provides stable, machine-readable output for all states
+        guard let out = try? await runGit(["status", "--porcelain", "-z"], cwd: repo.root) else {
+            return []
         }
         
-        let unstagedMap: [String: Change.Kind]
-        if let out = try? await runGit(["diff", "--name-status", "-z"], cwd: repo.root) {
-            unstagedMap = Self.parseNameStatusZ(out.stdout)
-        } else {
-            unstagedMap = [:]
-        }
-        
-        let untrackedNames = (try? await runGit(["ls-files", "--others", "--exclude-standard", "-z"], cwd: repo.root))?.stdout.split(separator: "\0").map { String($0) } ?? []
-
+        let (stagedF, worktreeF, untrackedF) = Self.parsePorcelainZ(out.stdout)
         var map: [String: Change] = [:]
-        func ensure(_ path: String) -> Change {
-            if let c = map[path] { return c }
-            let c = Change(path: path, staged: nil, worktree: nil)
-            map[path] = c
-            return c
+        func ensure(_ p: String) -> Change { 
+            if let c = map[p] { return c }
+            let c = Change(path: p, staged: nil, worktree: nil)
+            map[p] = c
+            return c 
         }
-        // staged
-        for (name, kind) in stagedMap where !name.isEmpty {
-            var c = ensure(name)
-            c.staged = kind
-            map[name] = c
-        }
-        // unstaged
-        for (name, kind) in unstagedMap where !name.isEmpty {
-            var c = ensure(name)
-            c.worktree = kind
-            map[name] = c
-        }
-        // untracked
-        for name in untrackedNames where !name.isEmpty {
-            var c = ensure(name)
-            c.worktree = .untracked
-            map[name] = c
-        }
-
-        var result = Array(map.values).sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-        if result.isEmpty {
-            // Fallback: parse porcelain output if name-status produced nothing (e.g., some git configs)
-            if let out = try? await runGit(["status", "--porcelain", "-z"], cwd: repo.root) {
-                let (stagedF, worktreeF, untrackedF) = Self.parsePorcelainZ(out.stdout)
-                var fmap: [String: Change] = [:]
-                func ensure(_ p: String) -> Change { if let c = fmap[p] { return c }; let c = Change(path: p, staged: nil, worktree: nil); fmap[p] = c; return c }
-                for (p, k) in stagedF { var c = ensure(p); c.staged = k; fmap[p] = c }
-                for (p, k) in worktreeF { var c = ensure(p); c.worktree = k; fmap[p] = c }
-                for p in untrackedF { var c = ensure(p); c.worktree = .untracked; fmap[p] = c }
-                result = Array(fmap.values).sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-            }
-        }
-        return result
+        
+        for (p, k) in stagedF { var c = ensure(p); c.staged = k; map[p] = c }
+        for (p, k) in worktreeF { var c = ensure(p); c.worktree = k; map[p] = c }
+        for p in untrackedF { var c = ensure(p); c.worktree = .untracked; map[p] = c }
+        
+        return Array(map.values).sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 
     func listVisibleFiles(in repo: Repo, limit: Int) async -> VisibleFilesResult? {
@@ -229,12 +191,18 @@ actor GitService {
             guard entry.count >= 2 else { break }
             let x = entry.first!  // index
             let y = entry.dropFirst().first!  // worktree
-            var path = String(entry.dropFirst(3)) // usually starts at index 3: "XY "
-            // Renames show as Rxxx or Cxxx followed by NUL then new path
-            if x == "R" || x == "C" {
-                // Next token is the new path
-                if i + 1 < tokens.count { path = tokens[i+1]; i += 1 }
+            // Format: XY PATH\0
+            // Renames: XY NEWPATH\0OLDPATH\0. We want NEWPATH.
+            // Usually starts at index 3: "XY "
+            let path = String(entry.dropFirst(3)) 
+            
+            // Check for renames/copies which consume an extra token (the old path)
+            if x == "R" || x == "C" || y == "R" || y == "C" {
+                // The current token 'path' is the NEW path.
+                // The NEXT token is the OLD path. We consume it but ignore it for status mapping.
+                if i + 1 < tokens.count { i += 1 }
             }
+            
             if x == "?" && y == "?" {
                 untracked.append(path)
             } else {
@@ -464,6 +432,7 @@ actor GitService {
     func logGraphCommits(
         in repo: Repo,
         limit: Int = 300,
+        skip: Int = 0,
         includeAllBranches: Bool = true,
         includeRemoteBranches: Bool = true,
         singleRef: String? = nil
@@ -488,6 +457,9 @@ actor GitService {
             "--pretty=format:\(fmt)",
             "-n", String(max(1, limit))
         ]
+        if skip > 0 {
+            args.append("--skip=\(skip)")
+        }
         args += revArgs
 
         guard let out = try? await runGit(args, cwd: repo.root), out.exitCode == 0 else {

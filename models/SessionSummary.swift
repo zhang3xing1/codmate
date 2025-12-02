@@ -97,12 +97,16 @@ struct SessionSummary: Identifiable, Hashable, Sendable, Codable {
     }
 
     var readableDuration: String {
+        return Self.durationFormatter.string(from: duration) ?? "—"
+    }
+
+    private static let durationFormatter: DateComponentsFormatter = {
         let formatter = DateComponentsFormatter()
         formatter.allowedUnits = [.hour, .minute, .second]
         formatter.unitsStyle = .abbreviated
         formatter.zeroFormattingBehavior = .pad
-        return formatter.string(from: duration) ?? "—"
-    }
+        return formatter
+    }()
 
     var displayModel: String? {
         guard let model else { return nil }
@@ -127,34 +131,25 @@ struct SessionSummary: Identifiable, Hashable, Sendable, Codable {
     }
 
     var resolvedFileSizeBytes: UInt64? {
-        if let fileSizeBytes { return fileSizeBytes }
-        if let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
-           let number = attributes[.size] as? NSNumber
-        {
-            return number.uint64Value
-        }
-        return nil
+        return fileSizeBytes
     }
 
     func matches(search term: String) -> Bool {
         guard !term.isEmpty else { return true }
-        let haystack = [
-            id,
-            displayName,
-            userTitle ?? "",
-            userComment ?? "",
-            cliVersion,
-            cwd,
-            originator,
-            instructions ?? "",
-            model ?? "",
-            approvalPolicy ?? "",
-        ].map { $0.lowercased() }
-
-        let needle = term.lowercased()
-        if haystack.contains(where: { $0.contains(needle) }) { return true }
-        if let host = remoteHost?.lowercased(), host.contains(needle) { return true }
-        if let remotePath = remotePath?.lowercased(), remotePath.contains(needle) { return true }
+        
+        if id.localizedCaseInsensitiveContains(term) { return true }
+        if displayName.localizedCaseInsensitiveContains(term) { return true }
+        if let userTitle, userTitle.localizedCaseInsensitiveContains(term) { return true }
+        if let userComment, userComment.localizedCaseInsensitiveContains(term) { return true }
+        if cliVersion.localizedCaseInsensitiveContains(term) { return true }
+        if cwd.localizedCaseInsensitiveContains(term) { return true }
+        if originator.localizedCaseInsensitiveContains(term) { return true }
+        if let instructions, instructions.localizedCaseInsensitiveContains(term) { return true }
+        if let model, model.localizedCaseInsensitiveContains(term) { return true }
+        if let approvalPolicy, approvalPolicy.localizedCaseInsensitiveContains(term) { return true }
+        if let host = remoteHost, host.localizedCaseInsensitiveContains(term) { return true }
+        if let remotePath, remotePath.localizedCaseInsensitiveContains(term) { return true }
+        
         return false
     }
 }

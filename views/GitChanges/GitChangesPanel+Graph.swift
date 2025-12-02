@@ -31,7 +31,7 @@ extension GitChangesPanel {
 
   // Host for the graph UI
   struct GraphContainer: View {
-    @StateObject var vm: GitGraphViewModel
+    @ObservedObject var vm: GitGraphViewModel
     let wrapText: Bool
     let showLineNumbers: Bool
     let compactColumns: Bool
@@ -46,7 +46,7 @@ extension GitChangesPanel {
       compactColumns: Bool,
       onActivateCommit: @escaping (GitService.GraphCommit?) -> Void
     ) {
-      _vm = StateObject(wrappedValue: vm)
+      self.vm = vm
       self.wrapText = wrapText
       self.showLineNumbers = showLineNumbers
       self.compactColumns = compactColumns
@@ -72,6 +72,7 @@ extension GitChangesPanel {
         .padding(.top, 16)
         .padding(.horizontal, 16)
         .onChange(of: vm.showAllBranches) { _, _ in vm.loadCommits() }
+        .onChange(of: vm.branchSearchQuery) { _, _ in vm.applyBranchFilter() }
 
         if let error = vm.errorMessage, !error.isEmpty {
           HStack(spacing: 6) {
@@ -132,6 +133,11 @@ extension GitChangesPanel {
                 }
               }
             }
+            .onAppear {
+              if row.isLast {
+                vm.loadMore()
+              }
+            }
           }
 
           if !compactColumns {
@@ -166,6 +172,15 @@ extension GitChangesPanel {
         .removeTableSpacing(rowHeight: rowHeight)
         .padding(.horizontal, 0)
         .padding(.top, 8)
+        .overlay(alignment: .bottom) {
+          if vm.isLoadingMore {
+            ProgressView()
+              .controlSize(.small)
+              .padding(8)
+              .background(.regularMaterial, in: Capsule())
+              .padding(.bottom, 16)
+          }
+        }
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
       .onAppear {
@@ -224,38 +239,72 @@ extension GitChangesPanel {
 
     @ViewBuilder
     private var branchSelector: some View {
-      HStack(spacing: 6) {
-        Text("Branches:")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .lineLimit(1)
-        Picker(
-          "",
-          selection: Binding<String>(
-            get: { vm.showAllBranches ? "__all__" : (vm.selectedBranch ?? "__current__") },
-            set: { newVal in
-              if newVal == "__all__" {
-                vm.showAllBranches = true
-                vm.selectedBranch = nil
-              } else if newVal == "__current__" {
-                vm.showAllBranches = false
-                vm.selectedBranch = nil
-              } else {
-                vm.showAllBranches = false
-                vm.selectedBranch = newVal
-              }
-              vm.loadCommits()
-            })
-        ) {
-          Text("Show All").tag("__all__")
-          Text("Current").tag("__current__")
-          Divider()
-          ForEach(vm.branches, id: \.self) { name in
-            Text(name).tag(name)
+      VStack(spacing: 4) {
+        HStack(spacing: 6) {
+          Text("Branches:")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+          Picker(
+            "",
+            selection: Binding<String>(
+              get: { vm.showAllBranches ? "__all__" : (vm.selectedBranch ?? "__current__") },
+              set: { newVal in
+                if newVal == "__all__" {
+                  vm.showAllBranches = true
+                  vm.selectedBranch = nil
+                } else if newVal == "__current__" {
+                  vm.showAllBranches = false
+                  vm.selectedBranch = nil
+                } else {
+                  vm.showAllBranches = false
+                  vm.selectedBranch = newVal
+                }
+                vm.loadCommits()
+              })
+          ) {
+            Text("Show All").tag("__all__")
+            Text("Current").tag("__current__")
+            Divider()
+            if vm.fullBranchList.count > 100 {
+              Text("Search to filter \(vm.fullBranchList.count) branches...").tag("__search__")
+                .foregroundStyle(.secondary)
+                .italic()
+            }
+            ForEach(vm.branches, id: \.self) { name in
+              Text(name).tag(name)
+            }
+          }
+          .pickerStyle(.menu)
+          .frame(width: 200)
+          .onAppear {
+            if vm.fullBranchList.isEmpty && !vm.isLoadingBranches {
+              vm.loadBranches()
+            }
+          }
+
+          if vm.isLoadingBranches {
+            ProgressView().controlSize(.small)
           }
         }
-        .pickerStyle(.menu)
-        .frame(width: 200)
+
+        if !vm.showAllBranches && vm.fullBranchList.count > 100 {
+          HStack(spacing: 4) {
+            Image(systemName: "magnifyingglass")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+            TextField("Filter branches...", text: $vm.branchSearchQuery)
+              .textFieldStyle(.plain)
+              .font(.caption)
+          }
+          .padding(.horizontal, 6)
+          .padding(.vertical, 3)
+          .background(
+            RoundedRectangle(cornerRadius: 4)
+              .stroke(Color.secondary.opacity(0.2))
+          )
+          .frame(width: 200)
+        }
       }
     }
 

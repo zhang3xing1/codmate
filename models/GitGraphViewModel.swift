@@ -20,6 +20,13 @@ final class GitGraphViewModel: ObservableObject {
     @Published private(set) var laneInfoById: [String: LaneInfo] = [:]
     @Published private(set) var maxLaneCount: Int = 1
 
+    // Pagination & Incremental Layout State
+    @Published var hasMoreCommits: Bool = true
+    @Published var isLoadingMore: Bool = false
+    private var skip: Int = 0
+    private let pageSize: Int = 25  // Reduced from 50 for faster initial render
+    private var currentLanesState: [String?] = []
+
     // Pre-computed row data for performance
     struct CommitRowData: Identifiable, Equatable {
         let id: String
@@ -53,10 +60,14 @@ final class GitGraphViewModel: ObservableObject {
     // Branch scope controls
     @Published var showAllBranches: Bool = true
     @Published var showRemoteBranches: Bool = true
-    @Published var limit: Int = 300
+    // limit is replaced by pagination logic
     @Published var branches: [String] = []
     @Published var selectedBranch: String? = nil   // nil = current HEAD when showAllBranches == false
     @Published private(set) var workingChangesCount: Int = 0
+    @Published var branchSearchQuery: String = ""
+    @Published var isLoadingBranches: Bool = false
+    @Published private(set) var fullBranchList: [String] = []  // Cache full list
+    private var branchesTask: Task<Void, Never>? = nil
 
     // Detail panel state (files + per-file patch)
     @Published private(set) var detailFiles: [GitService.FileChange] = []
@@ -77,16 +88,12 @@ final class GitGraphViewModel: ObservableObject {
     }
     @Published private(set) var historyActionInProgress: HistoryAction? = nil
 
-    // When loading commits, we briefly want to avoid building rowData
-    // before lane layout has been computed; otherwise the initial
-    // table render uses a degenerate lane count and graph column width.
-    private var suppressNextRowBuild: Bool = false
-
     deinit {
         laneLayoutTask?.cancel()
         refreshTask?.cancel()
         detailTask?.cancel()
         historyActionTask?.cancel()
+        branchesTask?.cancel()
     }
 
     func attach(to root: URL?) {
@@ -95,29 +102,68 @@ final class GitGraphViewModel: ObservableObject {
             _ = SecurityScopedBookmarks.shared.startAccessDynamic(for: root)
         }
         self.repo = GitService.Repo(root: root)
-        loadBranches()
-        loadCommits()
+        // Don't load branches immediately - will load on-demand when picker is opened
+        reload()
     }
 
-    func loadCommits(limit: Int = 200) {
-        guard let repo = self.repo else { return }
+    func triggerRefresh() {
+        reload()
+    }
+
+    func reload() {
+        guard let _ = self.repo else { return }
         refreshTask?.cancel()
+        laneLayoutTask?.cancel()
+        
+        // Reset state
+        skip = 0
+        hasMoreCommits = true
+        currentLanesState = []
+        commits = []
+        filteredCommits = []
+        laneInfoById = [:]
+        maxLaneCount = 1
+        rowData = []
+        laneLayoutGeneration &+= 1
+        
         refreshTask = Task { [weak self] in
             guard let self else { return }
-            isLoading = true
-            let list = await service.logGraphCommits(
-                in: repo,
-                limit: self.limit,
-                includeAllBranches: self.showAllBranches,
-                includeRemoteBranches: self.showRemoteBranches,
-                singleRef: (self.showAllBranches ? nil : (self.selectedBranch?.isEmpty == false ? self.selectedBranch : nil))
-            )
-            // Working tree virtual entry
+            await loadPage(isInitial: true)
+        }
+    }
+    
+    func loadMore() {
+        guard !isLoading, !isLoadingMore, hasMoreCommits, let _ = self.repo else { return }
+        isLoadingMore = true
+        refreshTask = Task { [weak self] in
+            guard let self else { return }
+            await loadPage(isInitial: false)
+        }
+    }
+
+    private func loadPage(isInitial: Bool) async {
+        guard let repo = self.repo else { return }
+        
+        await MainActor.run {
+            if isInitial { isLoading = true }
+        }
+        
+        let newCommits = await service.logGraphCommits(
+            in: repo,
+            limit: self.pageSize,
+            skip: self.skip,
+            includeAllBranches: self.showAllBranches,
+            includeRemoteBranches: self.showRemoteBranches,
+            singleRef: (self.showAllBranches ? nil : (self.selectedBranch?.isEmpty == false ? self.selectedBranch : nil))
+        )
+        
+        // Working tree virtual entry (only on initial load)
+        var finalList = newCommits
+        if isInitial {
             let status = await service.status(in: repo)
             self.workingChangesCount = status.count
-            var finalList = list
             if self.workingChangesCount > 0 {
-                let headId = list.first?.id
+                let headId = newCommits.first?.id
                 let virtual = GitService.GraphCommit(
                     id: "::working-tree::",
                     shortId: "*",
@@ -127,18 +173,31 @@ final class GitGraphViewModel: ObservableObject {
                     parents: headId != nil ? [headId!] : [],
                     decorations: []
                 )
-                finalList = [virtual] + list
+                finalList = [virtual] + newCommits
             }
-            isLoading = false
-            self.commits = finalList
-            // Defer the first rowData build until after lane layout
-            // has been computed so that maxLaneCount is accurate on
-            // the initial render and the graph column reserves enough
-            // width. Subsequent filter operations rebuild rows normally.
-            self.suppressNextRowBuild = true
-            applyFilter()
-            if selectedCommit == nil { selectedCommit = list.first }
-            computeLaneLayout()
+        }
+        
+        await MainActor.run {
+            if isInitial {
+                self.commits = finalList
+                self.isLoading = false
+                if self.selectedCommit == nil { self.selectedCommit = finalList.first }
+            } else {
+                // Append new commits
+                self.commits.append(contentsOf: newCommits)
+                self.isLoadingMore = false
+            }
+            
+            if newCommits.count < self.pageSize {
+                self.hasMoreCommits = false
+            }
+            self.skip += newCommits.count
+            
+            // Update filtered list so rows appear immediately
+            self.applyFilter()
+            
+            // Trigger incremental layout
+            self.computeIncrementalLayout(newCommits: isInitial ? finalList : newCommits, isInitial: isInitial)
         }
     }
 
@@ -146,13 +205,12 @@ final class GitGraphViewModel: ObservableObject {
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else {
             filteredCommits = commits
-            if suppressNextRowBuild {
-                suppressNextRowBuild = false
-            } else {
-                buildRowData()
-            }
+            buildRowData()
             return
         }
+        // Note: Filtering currently operates only on loaded commits. 
+        // Ideally we would search the whole history, but for graph view,
+        // we prioritized the loaded graph structure.
         let basic = commits.filter { c in
             if c.subject.lowercased().contains(q) { return true }
             if c.author.lowercased().contains(q) { return true }
@@ -160,21 +218,9 @@ final class GitGraphViewModel: ObservableObject {
             if c.decorations.joined(separator: ",").lowercased().contains(q) { return true }
             return false
         }
-        // Also include commits whose messages match (subject/body) via git --grep
-        guard let repo else {
-            filteredCommits = basic
-            buildRowData()
-            return
-        }
-        Task { [weak self] in
-            guard let self else { return }
-            let ids = await self.service.searchCommitIds(in: repo, query: q, includeAllBranches: self.showAllBranches, includeRemoteBranches: self.showRemoteBranches, singleRef: (self.showAllBranches ? nil : (self.selectedBranch?.isEmpty == false ? self.selectedBranch : nil)))
-            let extra = commits.filter { ids.contains($0.id) }
-            await MainActor.run {
-                self.filteredCommits = Array(Set(basic + extra))
-                self.buildRowData()
-            }
-        }
+        filteredCommits = basic
+        buildRowData()
+        // Optional: Trigger background grep if needed, but omitted here to keep graph stable
     }
 
     private func buildRowData() {
@@ -275,80 +321,61 @@ final class GitGraphViewModel: ObservableObject {
     private struct LaneLayoutResult: Sendable {
         let byId: [String: LaneInfo]
         let maxLaneCount: Int
+        let finalLanes: [String?]
     }
 
     // MARK: - Lanes
-    private func computeLaneLayout() {
-        let currentCommits = commits
-        laneLayoutGeneration &+= 1
+    private func computeIncrementalLayout(newCommits: [GitService.GraphCommit], isInitial: Bool) {
+        let snapshot = newCommits
+        let initialLanes = isInitial ? [] : currentLanesState
+        let initialMax = isInitial ? 1 : maxLaneCount
         let generation = laneLayoutGeneration
-        laneLayoutTask?.cancel()
-
-        guard !currentCommits.isEmpty else {
-            laneLayoutTask = nil
-            laneInfoById = [:]
-            maxLaneCount = 1
-            buildRowData()
-            return
-        }
-
-        // For small histories, compute synchronously on the main actor
-        // to avoid the overhead of task hopping.
-        if currentCommits.count <= 400 {
-            if let result = Self.computeLaneLayout(for: currentCommits) {
-                laneLayoutTask = nil
-                laneInfoById = result.byId
-                maxLaneCount = result.maxLaneCount
-                buildRowData()
-            }
-            return
-        }
-
-        let snapshot = currentCommits
-        let startTime = CFAbsoluteTimeGetCurrent()
-        laneLayoutTask = Task(priority: .userInitiated) { [weak self] in
-            guard let self else { return }
-            guard let result = Self.computeLaneLayout(for: snapshot) else { return }
+        
+        laneLayoutTask = Task.detached(priority: .userInitiated) {
+            guard let result = Self.computeLaneLayout(
+                for: snapshot, 
+                initialLanes: initialLanes, 
+                initialMaxLane: initialMax
+            ) else { return }
+            
             if Task.isCancelled { return }
-
-            let duration = CFAbsoluteTimeGetCurrent() - startTime
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 guard self.laneLayoutGeneration == generation else { return }
-                self.laneLayoutTask = nil
-                self.laneInfoById = result.byId
-                self.maxLaneCount = result.maxLaneCount
-                #if DEBUG
-                if duration > 0.1 {
-                    print("[GitGraph] Layout took \(String(format: "%.3f", duration))s for \(snapshot.count) commits")
+                if isInitial {
+                    self.laneInfoById = result.byId
+                } else {
+                    self.laneInfoById.merge(result.byId) { (_, new) in new }
                 }
-                #endif
+                self.maxLaneCount = result.maxLaneCount
+                self.currentLanesState = result.finalLanes
                 self.buildRowData()
             }
         }
     }
 
-    private static func computeLaneLayout(for commits: [GitService.GraphCommit]) -> LaneLayoutResult? {
+    nonisolated private static func computeLaneLayout(
+        for commits: [GitService.GraphCommit],
+        initialLanes: [String?] = [],
+        initialMaxLane: Int = 1
+    ) -> LaneLayoutResult? {
         guard !commits.isEmpty else {
-            return LaneLayoutResult(byId: [:], maxLaneCount: 1)
+            return LaneLayoutResult(byId: [:], maxLaneCount: initialMaxLane, finalLanes: initialLanes)
         }
 
-        // lanes array holds the commit SHA expected to appear in that lane in the NEXT row
-        var lanes: [String?] = []
+        var lanes: [String?] = initialLanes
         var byId: [String: LaneInfo] = [:]
-        var maxLanes = 1
+        var maxLanes = initialMaxLane
         var processed = 0
 
         for commit in commits {
-            // Periodically check for cancellation to avoid doing
-            // unnecessary work when a newer layout request arrives.
             if processed & 0x1F == 0, Task.isCancelled {
                 return nil
             }
             processed &+= 1
 
-            let before = lanes // snapshot for continuing determination
+            let before = lanes 
 
             // Determine current lane for this commit
             let laneIndex: Int
@@ -362,16 +389,13 @@ final class GitGraphViewModel: ObservableObject {
                 lanes.append(nil)
             }
 
-            // Assign parents to lanes for the next row
             var parentLaneIndices: [Int] = []
             if let firstParent = commit.parents.first {
-                // First parent continues the current lane
                 if laneIndex < lanes.count { lanes[laneIndex] = firstParent } else {
-                    // shouldn't happen, but be safe
                     lanes.append(firstParent)
                 }
                 parentLaneIndices.append(laneIndex)
-                // Additional parents take other lanes (existing if present, else empty slot, else append)
+                
                 if commit.parents.count > 1 {
                     for p in commit.parents.dropFirst() {
                         if let existing = lanes.firstIndex(where: { $0 == p }) {
@@ -386,24 +410,18 @@ final class GitGraphViewModel: ObservableObject {
                     }
                 }
             } else {
-                // No parents; lane ends here
                 if laneIndex < lanes.count { lanes[laneIndex] = nil }
             }
 
-            // When the same commit id appears in multiple lanes in the pre-state,
-            // treat the extra occurrences as branch joins into this commit.
             let joinLanes: [Int] = before.enumerated().compactMap { index, value in
                 (value == commit.id && index != laneIndex) ? index : nil
             }
-            // After this commit row, those join lanes should terminate instead of
-            // continuing further into older history.
             if !joinLanes.isEmpty {
                 for j in joinLanes where j < lanes.count {
                     lanes[j] = nil
                 }
             }
 
-            // Trim trailing nils to keep lane array compact
             while let last = lanes.last, last == nil { _ = lanes.popLast() }
 
             let after = lanes
@@ -424,22 +442,39 @@ final class GitGraphViewModel: ObservableObject {
                 continuingLanes: continuing,
                 joinLaneIndices: joinLanes
             )
-            if let localMax = (parentLaneIndices + joinLanes + [laneIndex]).max() {
-                maxLanes = max(maxLanes, localMax + 1)
-            } else {
-                maxLanes = max(maxLanes, laneIndex + 1)
-            }
+            
+            let rowMax = (parentLaneIndices + joinLanes + [laneIndex]).max() ?? 0
+            maxLanes = max(maxLanes, rowMax + 1)
         }
 
-        return LaneLayoutResult(byId: byId, maxLaneCount: max(1, maxLanes))
+        return LaneLayoutResult(byId: byId, maxLaneCount: max(1, maxLanes), finalLanes: lanes)
     }
 
     func loadBranches() {
-        guard let repo else { branches = []; return }
-        Task { [weak self] in
+        guard let repo else { branches = []; fullBranchList = []; return }
+        branchesTask?.cancel()
+        isLoadingBranches = true
+        branchesTask = Task { [weak self] in
             guard let self else { return }
             let names = await service.listBranches(in: repo, includeRemoteBranches: showRemoteBranches)
-            await MainActor.run { self.branches = names }
+            if Task.isCancelled { return }
+            await MainActor.run {
+                self.fullBranchList = names
+                self.applyBranchFilter()
+                self.isLoadingBranches = false
+                self.branchesTask = nil
+            }
+        }
+    }
+
+    func applyBranchFilter() {
+        let query = branchSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if query.isEmpty {
+            // Limit to first 100 branches for performance
+            branches = Array(fullBranchList.prefix(100))
+        } else {
+            // Filter and limit
+            branches = Array(fullBranchList.filter { $0.lowercased().contains(query) }.prefix(100))
         }
     }
 
@@ -447,8 +482,8 @@ final class GitGraphViewModel: ObservableObject {
         errorMessage = nil
     }
 
-    func triggerRefresh() {
-        loadCommits()
+    func loadCommits() {
+        reload()
     }
 
     func fetchRemotes() {
@@ -492,7 +527,7 @@ final class GitGraphViewModel: ObservableObject {
                 self.historyActionTask = nil
                 if code == 0 {
                     self.errorMessage = nil
-                    self.loadCommits()
+                    self.reload()
                 } else {
                     if let detail = failureDetail, !detail.isEmpty {
                         self.errorMessage = detail.trimmingCharacters(in: .whitespacesAndNewlines)

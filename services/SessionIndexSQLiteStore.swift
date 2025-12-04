@@ -1,0 +1,799 @@
+import Foundation
+import OSLog
+import SQLite3
+
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+/// Token 分项，用于长期保留 input/output/cache 细粒度统计。
+struct TokenBreakdown: Sendable, Equatable {
+  let input: Int
+  let output: Int
+  let cacheRead: Int
+  let cacheCreation: Int
+
+  var total: Int { input + output + cacheRead + cacheCreation }
+}
+
+/// 持久化缓存的一条记录，包含 SessionSummary 以及文件元数据。
+struct SessionIndexRecord: Sendable {
+  let summary: SessionSummary
+  let filePath: String
+  let fileModificationTime: Date?
+  let fileSize: UInt64?
+  let project: String?
+  let schemaVersion: Int
+  let parseError: String?
+  let tokenBreakdown: TokenBreakdown?
+}
+
+struct SessionIndexMeta: Sendable {
+  let lastFullIndexAt: Date?
+  let sessionCount: Int
+}
+
+enum SessionIndexSQLiteStoreError: Error {
+  case openFailed(String)
+  case stepFailed(String)
+  case bindFailed(String)
+  case decodeFailed(String)
+}
+
+/// SQLite 持久化缓存，负责 sessions 汇总数据的存储与读取。
+actor SessionIndexSQLiteStore {
+  static let schemaVersion = 1
+
+  private let logger = Logger(subsystem: "io.umate.codmate", category: "SessionIndexSQLiteStore")
+  private let dbURL: URL
+  private var db: OpaquePointer?
+
+  init(baseDirectory: URL? = nil, fileManager: FileManager = .default) {
+    let directory: URL
+    if let baseDirectory {
+      directory = baseDirectory
+    } else {
+      directory = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codmate", isDirectory: true)
+    }
+    try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+    dbURL = directory.appendingPathComponent("sessionIndex-v2.db")
+  }
+
+  // MARK: - Public API
+
+  func reset() throws {
+    closeDatabase()
+    try? FileManager.default.removeItem(at: dbURL)
+  }
+
+  /// 更新全量索引完成时间和记录数。
+  func setMeta(lastFullIndexAt: Date, sessionCount: Int) throws {
+    try openIfNeeded()
+    let sql =
+      "INSERT INTO meta (key, last_full_index_at, session_count) VALUES ('global', ?1, ?2) ON CONFLICT(key) DO UPDATE SET last_full_index_at=excluded.last_full_index_at, session_count=excluded.session_count"
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+    defer { sqlite3_finalize(stmt) }
+    sqlite3_bind_double(stmt, 1, lastFullIndexAt.timeIntervalSince1970)
+    sqlite3_bind_int(stmt, 2, Int32(sessionCount))
+    guard sqlite3_step(stmt) == SQLITE_DONE else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+  }
+
+  func fetchMeta() throws -> SessionIndexMeta {
+    try openIfNeeded()
+    let sql = "SELECT last_full_index_at, session_count FROM meta WHERE key = 'global' LIMIT 1"
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+    defer { sqlite3_finalize(stmt) }
+    if sqlite3_step(stmt) == SQLITE_ROW {
+      let ts = sqlite3_column_double(stmt, 0)
+      let count = Int(sqlite3_column_int(stmt, 1))
+      let date = ts == 0 ? nil : Date(timeIntervalSince1970: ts)
+      return SessionIndexMeta(lastFullIndexAt: date, sessionCount: count)
+    }
+    return SessionIndexMeta(lastFullIndexAt: nil, sessionCount: 0)
+  }
+
+  /// 按文件路径 + mtime（可选 fileSize 校验）命中缓存，用于索引快速路径。
+  func fetch(path: String, modificationDate: Date?, fileSize: UInt64?) throws -> SessionSummary? {
+    guard let modificationDate else { return nil }
+    try openIfNeeded()
+    let sql =
+      "SELECT payload, file_size FROM sessions WHERE file_path = ?1 AND file_mtime = ?2 LIMIT 1"
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+    defer { sqlite3_finalize(stmt) }
+
+    sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT)
+    sqlite3_bind_double(stmt, 2, modificationDate.timeIntervalSince1970)
+
+    if sqlite3_step(stmt) == SQLITE_ROW {
+      let storedSize = columnInt64(stmt, index: 1).flatMap { UInt64($0) }
+      if let fileSize, let storedSize, fileSize != storedSize {
+        return nil
+      }
+      guard let payload = columnData(stmt, index: 0) else { return nil }
+      return try JSONDecoder().decode(SessionSummary.self, from: payload)
+    }
+    return nil
+  }
+
+  func fetch(sessionId: String) throws -> SessionIndexRecord? {
+    try openIfNeeded()
+    let sql = "SELECT payload, file_path, file_mtime, file_size, project, schema_version, parse_error, tokens_input, tokens_output, tokens_cache_read, tokens_cache_creation FROM sessions WHERE session_id = ?1" // swiftlint:disable:this line_length
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+    defer { sqlite3_finalize(stmt) }
+
+    sqlite3_bind_text(stmt, 1, sessionId, -1, SQLITE_TRANSIENT)
+
+    if sqlite3_step(stmt) == SQLITE_ROW {
+      guard let payload = columnData(stmt, index: 0) else {
+        throw SessionIndexSQLiteStoreError.decodeFailed("Missing payload for session_id=\(sessionId)")
+      }
+      let summary = try JSONDecoder().decode(SessionSummary.self, from: payload)
+      let filePath = columnText(stmt, index: 1) ?? summary.fileURL.path
+      let fileMtime = columnDate(stmt, index: 2)
+      let fileSize = columnInt64(stmt, index: 3).flatMap { UInt64($0) }
+      let project = columnText(stmt, index: 4)
+      let schemaVersion = Int(sqlite3_column_int(stmt, 5))
+      let parseError = columnText(stmt, index: 6)
+      let tokenBreakdown = tokenBreakdownFromColumns(stmt, startIndex: 7)
+      return SessionIndexRecord(
+        summary: summary,
+        filePath: filePath,
+        fileModificationTime: fileMtime,
+        fileSize: fileSize,
+        project: project,
+        schemaVersion: schemaVersion,
+        parseError: parseError,
+        tokenBreakdown: tokenBreakdown
+      )
+    }
+    return nil
+  }
+
+  func fetchAll(limit: Int? = nil) throws -> [SessionIndexRecord] {
+    try openIfNeeded()
+    var sql = "SELECT payload, file_path, file_mtime, file_size, project, schema_version, parse_error, tokens_input, tokens_output, tokens_cache_read, tokens_cache_creation FROM sessions"
+    if let limit { sql += " LIMIT \(limit)" }
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+    defer { sqlite3_finalize(stmt) }
+
+    var result: [SessionIndexRecord] = []
+    let decoder = JSONDecoder()
+    while sqlite3_step(stmt) == SQLITE_ROW {
+      guard let payload = columnData(stmt, index: 0) else { continue }
+      guard let summary = try? decoder.decode(SessionSummary.self, from: payload) else { continue }
+      let filePath = columnText(stmt, index: 1) ?? summary.fileURL.path
+      let fileMtime = columnDate(stmt, index: 2)
+      let fileSize = columnInt64(stmt, index: 3).flatMap { UInt64($0) }
+      let project = columnText(stmt, index: 4)
+      let schemaVersion = Int(sqlite3_column_int(stmt, 5))
+      let parseError = columnText(stmt, index: 6)
+      let tokenBreakdown = tokenBreakdownFromColumns(stmt, startIndex: 7)
+      result.append(
+        SessionIndexRecord(
+          summary: summary,
+          filePath: filePath,
+          fileModificationTime: fileMtime,
+          fileSize: fileSize,
+          project: project,
+          schemaVersion: schemaVersion,
+          parseError: parseError,
+          tokenBreakdown: tokenBreakdown
+        )
+      )
+    }
+    return result
+  }
+
+  /// 聚合 Overview 统计（全部来源，使用缓存数据）。
+  func fetchOverviewAggregate() throws -> OverviewAggregate {
+    let started = Date()
+    try openIfNeeded()
+    let totals = try fetchTotals()
+    let sources = try fetchSourceAggregates()
+    let daily = try fetchDailyAggregates()
+    let elapsed = Date().timeIntervalSince(started)
+    logger.log("fetchOverviewAggregate totals.sessions=\(totals.sessions, privacy: .public) sources=\(sources.count, privacy: .public) daily=\(daily.count, privacy: .public) in \(elapsed, format: .fixed(precision: 3))s")
+    return OverviewAggregate(
+      totalSessions: totals.sessions,
+      totalTokens: totals.tokens,
+      totalDuration: totals.duration,
+      userMessages: totals.userMessages,
+      assistantMessages: totals.assistantMessages,
+      toolInvocations: totals.toolInvocations,
+      sources: sources,
+      daily: daily,
+      generatedAt: Date()
+    )
+  }
+
+  /// 缓存覆盖范围（命中源、记录数、全量完成时间）。
+  func fetchCoverage() throws -> SessionIndexCoverage {
+    let started = Date()
+    try openIfNeeded()
+    let meta = try fetchMeta()
+    let sources = try distinctSources()
+    let sessionCount = try countSessions()
+    let elapsed = Date().timeIntervalSince(started)
+    logger.log("fetchCoverage sessions=\(sessionCount, privacy: .public) sources=\(sources, privacy: .public) metaTs=\(meta.lastFullIndexAt?.timeIntervalSince1970 ?? 0, privacy: .public) in \(elapsed, format: .fixed(precision: 3))s")
+    return SessionIndexCoverage(
+      sessionCount: sessionCount,
+      lastFullIndexAt: meta.lastFullIndexAt,
+      sources: sources
+    )
+  }
+
+  func upsert(
+    summary: SessionSummary,
+    project: String?,
+    fileModificationTime: Date?,
+    fileSize: UInt64?,
+    tokenBreakdown: TokenBreakdown?,
+    parseError: String? = nil
+  ) throws {
+    try openIfNeeded()
+
+    let sql = """
+    INSERT INTO sessions (
+      session_id, file_path, file_mtime, file_size, schema_version, parse_error,
+      project, source, source_host, started_at, ended_at, last_updated_at,
+      active_duration, cli_version, cwd, originator, instructions, model,
+      approval_policy, user_message_count, assistant_message_count,
+      tool_invocation_count, reasoning_count, response_counts_json,
+      turn_context_count, tokens_input, tokens_output, tokens_cache_read,
+      tokens_cache_creation, tokens_total, event_count, line_count, remote_path,
+      user_title, user_comment, task_id, has_terminal, has_review, payload
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5, ?6,
+      ?7, ?8, ?9, ?10, ?11, ?12,
+      ?13, ?14, ?15, ?16, ?17, ?18,
+      ?19, ?20, ?21, ?22, ?23, ?24,
+      ?25, ?26, ?27, ?28, ?29, ?30,
+      ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39
+    )
+    ON CONFLICT(session_id) DO UPDATE SET
+      file_path=excluded.file_path,
+      file_mtime=excluded.file_mtime,
+      file_size=excluded.file_size,
+      schema_version=excluded.schema_version,
+      parse_error=excluded.parse_error,
+      project=excluded.project,
+      source=excluded.source,
+      source_host=excluded.source_host,
+      started_at=excluded.started_at,
+      ended_at=excluded.ended_at,
+      last_updated_at=excluded.last_updated_at,
+      active_duration=excluded.active_duration,
+      cli_version=excluded.cli_version,
+      cwd=excluded.cwd,
+      originator=excluded.originator,
+      instructions=excluded.instructions,
+      model=excluded.model,
+      approval_policy=excluded.approval_policy,
+      user_message_count=excluded.user_message_count,
+      assistant_message_count=excluded.assistant_message_count,
+      tool_invocation_count=excluded.tool_invocation_count,
+      reasoning_count=excluded.reasoning_count,
+      response_counts_json=excluded.response_counts_json,
+      turn_context_count=excluded.turn_context_count,
+      tokens_input=excluded.tokens_input,
+      tokens_output=excluded.tokens_output,
+      tokens_cache_read=excluded.tokens_cache_read,
+      tokens_cache_creation=excluded.tokens_cache_creation,
+      tokens_total=excluded.tokens_total,
+      event_count=excluded.event_count,
+      line_count=excluded.line_count,
+      remote_path=excluded.remote_path,
+      user_title=excluded.user_title,
+      user_comment=excluded.user_comment,
+      task_id=excluded.task_id,
+      has_terminal=excluded.has_terminal,
+      has_review=excluded.has_review,
+      payload=excluded.payload
+    """
+
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+    defer { sqlite3_finalize(stmt) }
+
+    let responseCountsJSON = (try? JSONEncoder().encode(summary.responseCounts)).flatMap {
+      String(data: $0, encoding: .utf8)
+    }
+    let summaryData = try JSONEncoder().encode(summary)
+
+    bindText(stmt, index: 1, value: summary.id)
+    bindText(stmt, index: 2, value: summary.fileURL.path)
+    bindDate(stmt, index: 3, value: fileModificationTime)
+    bindInt64(stmt, index: 4, value: fileSize.map(Int64.init))
+    sqlite3_bind_int(stmt, 5, Int32(Self.schemaVersion))
+    bindText(stmt, index: 6, value: parseError)
+    bindText(stmt, index: 7, value: project)
+    let sourceEncoding = encode(source: summary.source)
+    bindText(stmt, index: 8, value: sourceEncoding.kind)
+    bindText(stmt, index: 9, value: sourceEncoding.host)
+    bindDate(stmt, index: 10, value: summary.startedAt)
+    bindDate(stmt, index: 11, value: summary.endedAt)
+    bindDate(stmt, index: 12, value: summary.lastUpdatedAt)
+    bindDouble(stmt, index: 13, value: summary.activeDuration)
+    bindText(stmt, index: 14, value: summary.cliVersion)
+    bindText(stmt, index: 15, value: summary.cwd)
+    bindText(stmt, index: 16, value: summary.originator)
+    bindText(stmt, index: 17, value: summary.instructions)
+    bindText(stmt, index: 18, value: summary.model)
+    bindText(stmt, index: 19, value: summary.approvalPolicy)
+    sqlite3_bind_int(stmt, 20, Int32(summary.userMessageCount))
+    sqlite3_bind_int(stmt, 21, Int32(summary.assistantMessageCount))
+    sqlite3_bind_int(stmt, 22, Int32(summary.toolInvocationCount))
+    sqlite3_bind_int(stmt, 23, Int32(summary.responseCounts["reasoning"] ?? 0))
+    bindText(stmt, index: 24, value: responseCountsJSON)
+    sqlite3_bind_int(stmt, 25, Int32(summary.turnContextCount))
+    bindInt(stmt, index: 26, value: tokenBreakdown?.input)
+    bindInt(stmt, index: 27, value: tokenBreakdown?.output)
+    bindInt(stmt, index: 28, value: tokenBreakdown?.cacheRead)
+    bindInt(stmt, index: 29, value: tokenBreakdown?.cacheCreation)
+    bindInt(stmt, index: 30, value: summary.totalTokens)
+    sqlite3_bind_int(stmt, 31, Int32(summary.eventCount))
+    sqlite3_bind_int(stmt, 32, Int32(summary.lineCount))
+    bindText(stmt, index: 33, value: summary.remotePath)
+    bindText(stmt, index: 34, value: summary.userTitle)
+    bindText(stmt, index: 35, value: summary.userComment)
+    bindText(stmt, index: 36, value: summary.taskId?.uuidString)
+    sqlite3_bind_int(stmt, 37, 0) // has_terminal (placeholder)
+    sqlite3_bind_int(stmt, 38, 0) // has_review (placeholder)
+    bindData(stmt, index: 39, data: summaryData)
+
+    let stepResult = sqlite3_step(stmt)
+    guard stepResult == SQLITE_DONE else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+  }
+
+  func delete(sessionId: String) throws {
+    try openIfNeeded()
+    let sql = "DELETE FROM sessions WHERE session_id = ?1"
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+    defer { sqlite3_finalize(stmt) }
+    sqlite3_bind_text(stmt, 1, sessionId, -1, SQLITE_TRANSIENT)
+    guard sqlite3_step(stmt) == SQLITE_DONE else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+  }
+
+  /// 批量 upsert，使用单个事务降低开销。
+  func upsertBatch(summaries: [SessionSummary]) throws {
+    guard !summaries.isEmpty else { return }
+    try openIfNeeded()
+    try exec("BEGIN IMMEDIATE TRANSACTION;")
+    do {
+      for summary in summaries {
+        try upsert(
+          summary: summary,
+          project: nil,
+          fileModificationTime: nil,
+          fileSize: summary.fileSizeBytes,
+          tokenBreakdown: nil,
+          parseError: nil
+        )
+      }
+      try exec("COMMIT;")
+    } catch {
+      let _ = try? exec("ROLLBACK;")
+      throw error
+    }
+  }
+
+  // MARK: - Private
+
+  private func openIfNeeded() throws {
+    if db != nil { return }
+    let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+    if sqlite3_open_v2(dbURL.path, &db, flags, nil) != SQLITE_OK {
+      throw SessionIndexSQLiteStoreError.openFailed(errorMessage)
+    }
+    try applyPragmas()
+    try migrateIfNeeded()
+  }
+
+  private func closeDatabase() {
+    if let db {
+      sqlite3_close(db)
+    }
+    db = nil
+  }
+
+  private func applyPragmas() throws {
+    try exec("PRAGMA journal_mode=WAL;")
+    try exec("PRAGMA synchronous=NORMAL;")
+    try exec("PRAGMA foreign_keys=ON;")
+    try exec("PRAGMA temp_store=MEMORY;")
+    try exec("PRAGMA cache_size=-2000;") // ~2MB page cache
+    try exec("PRAGMA busy_timeout=5000;")
+  }
+
+  private func migrateIfNeeded() throws {
+    let createSQL = """
+    CREATE TABLE IF NOT EXISTS meta (
+      key TEXT PRIMARY KEY,
+      last_full_index_at REAL,
+      session_count INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+      session_id TEXT PRIMARY KEY,
+      file_path TEXT NOT NULL,
+      file_mtime REAL,
+      file_size INTEGER,
+      schema_version INTEGER NOT NULL,
+      parse_error TEXT,
+      project TEXT,
+      source TEXT NOT NULL,
+      source_host TEXT,
+      started_at REAL NOT NULL,
+      ended_at REAL,
+      last_updated_at REAL,
+      active_duration REAL,
+      cli_version TEXT NOT NULL,
+      cwd TEXT NOT NULL,
+      originator TEXT NOT NULL,
+      instructions TEXT,
+      model TEXT,
+      approval_policy TEXT,
+      user_message_count INTEGER NOT NULL,
+      assistant_message_count INTEGER NOT NULL,
+      tool_invocation_count INTEGER NOT NULL,
+      reasoning_count INTEGER NOT NULL,
+      response_counts_json TEXT,
+      turn_context_count INTEGER NOT NULL,
+      tokens_input INTEGER,
+      tokens_output INTEGER,
+      tokens_cache_read INTEGER,
+      tokens_cache_creation INTEGER,
+      tokens_total INTEGER,
+      event_count INTEGER NOT NULL,
+      line_count INTEGER NOT NULL,
+      remote_path TEXT,
+      user_title TEXT,
+      user_comment TEXT,
+      task_id TEXT,
+      has_terminal INTEGER,
+      has_review INTEGER,
+      payload BLOB NOT NULL
+    );
+    """
+    try exec(createSQL)
+    try exec("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);")
+    try exec("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(last_updated_at);")
+    try exec("CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);")
+    try exec("CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);")
+  }
+
+  @discardableResult
+  private func exec(_ sql: String) throws -> Int32 {
+    var errorMessagePointer: UnsafeMutablePointer<Int8>?
+    let code = sqlite3_exec(db, sql, nil, nil, &errorMessagePointer)
+    if let errorMessagePointer {
+      let message = String(cString: errorMessagePointer)
+      sqlite3_free(errorMessagePointer)
+      if code != SQLITE_OK {
+        throw SessionIndexSQLiteStoreError.stepFailed(message)
+      }
+    } else if code != SQLITE_OK {
+      throw SessionIndexSQLiteStoreError.stepFailed("Unknown SQLite error")
+    }
+    return code
+  }
+
+  private var errorMessage: String {
+    if let cString = sqlite3_errmsg(db) {
+      return String(cString: cString)
+    }
+    return "Unknown SQLite error"
+  }
+
+  // MARK: - Binding helpers
+
+  private func bindText(_ stmt: OpaquePointer?, index: Int32, value: String?) {
+    if let value {
+      sqlite3_bind_text(stmt, index, value, -1, SQLITE_TRANSIENT)
+    } else {
+      sqlite3_bind_null(stmt, index)
+    }
+  }
+
+  private func bindInt(_ stmt: OpaquePointer?, index: Int32, value: Int?) {
+    if let value {
+      sqlite3_bind_int(stmt, index, Int32(value))
+    } else {
+      sqlite3_bind_null(stmt, index)
+    }
+  }
+
+  private func bindInt64(_ stmt: OpaquePointer?, index: Int32, value: Int64?) {
+    if let value {
+      sqlite3_bind_int64(stmt, index, value)
+    } else {
+      sqlite3_bind_null(stmt, index)
+    }
+  }
+
+  private func bindDouble(_ stmt: OpaquePointer?, index: Int32, value: TimeInterval?) {
+    if let value {
+      sqlite3_bind_double(stmt, index, value)
+    } else {
+      sqlite3_bind_null(stmt, index)
+    }
+  }
+
+  private func bindDate(_ stmt: OpaquePointer?, index: Int32, value: Date?) {
+    if let value {
+      sqlite3_bind_double(stmt, index, value.timeIntervalSince1970)
+    } else {
+      sqlite3_bind_null(stmt, index)
+    }
+  }
+
+  private func bindData(_ stmt: OpaquePointer?, index: Int32, data: Data) {
+    _ = data.withUnsafeBytes { ptr in
+      sqlite3_bind_blob(stmt, index, ptr.baseAddress, Int32(data.count), SQLITE_TRANSIENT)
+    }
+  }
+
+  // MARK: - Column helpers
+
+  private func columnText(_ stmt: OpaquePointer?, index: Int32) -> String? {
+    guard let cString = sqlite3_column_text(stmt, index) else { return nil }
+    return String(cString: cString)
+  }
+
+  private func columnData(_ stmt: OpaquePointer?, index: Int32) -> Data? {
+    guard let bytes = sqlite3_column_blob(stmt, index) else { return nil }
+    let length = Int(sqlite3_column_bytes(stmt, index))
+    return Data(bytes: bytes, count: length)
+  }
+
+  private func columnDate(_ stmt: OpaquePointer?, index: Int32) -> Date? {
+    let value = sqlite3_column_double(stmt, index)
+    if value == 0 { return nil }
+    return Date(timeIntervalSince1970: value)
+  }
+
+  private func columnInt64(_ stmt: OpaquePointer?, index: Int32) -> Int64? {
+    let value = sqlite3_column_int64(stmt, index)
+    if sqlite3_column_type(stmt, index) == SQLITE_NULL { return nil }
+    return value
+  }
+
+  private func tokenBreakdownFromColumns(_ stmt: OpaquePointer?, startIndex: Int32) -> TokenBreakdown? {
+    let input = columnInt64(stmt, index: startIndex).map(Int.init)
+    let output = columnInt64(stmt, index: startIndex + 1).map(Int.init)
+    let cacheRead = columnInt64(stmt, index: startIndex + 2).map(Int.init)
+    let cacheCreation = columnInt64(stmt, index: startIndex + 3).map(Int.init)
+    guard let input, let output, let cacheRead, let cacheCreation else { return nil }
+    return TokenBreakdown(input: input, output: output, cacheRead: cacheRead, cacheCreation: cacheCreation)
+  }
+
+  // MARK: - Source encoding helpers
+
+  private func encode(source: SessionSource) -> (kind: String, host: String?) {
+    switch source {
+    case .codexLocal:
+      return ("codexLocal", nil)
+    case .claudeLocal:
+      return ("claudeLocal", nil)
+    case .geminiLocal:
+      return ("geminiLocal", nil)
+    case .codexRemote(let host):
+      return ("codexRemote", host)
+    case .claudeRemote(let host):
+      return ("claudeRemote", host)
+    case .geminiRemote(let host):
+      return ("geminiRemote", host)
+    }
+  }
+
+  private func decodeKind(_ value: String) -> SessionSource.Kind? {
+    switch value {
+    case "codexLocal", "codexRemote":
+      return .codex
+    case "claudeLocal", "claudeRemote":
+      return .claude
+    case "geminiLocal", "geminiRemote":
+      return .gemini
+    default:
+      return nil
+    }
+  }
+
+  private func distinctSources() throws -> [SessionSource.Kind] {
+    let sql = "SELECT DISTINCT source FROM sessions"
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+    defer { sqlite3_finalize(stmt) }
+    var kinds: [SessionSource.Kind] = []
+    while sqlite3_step(stmt) == SQLITE_ROW {
+      if let text = columnText(stmt, index: 0), let kind = decodeKind(text) {
+        kinds.append(kind)
+      }
+    }
+    return Array(Set(kinds)).sorted { $0.rawValue < $1.rawValue }
+  }
+
+  private func fetchTotals() throws -> (sessions: Int, tokens: Int, duration: TimeInterval, userMessages: Int, assistantMessages: Int, toolInvocations: Int) {
+    let sql = """
+    SELECT
+      COUNT(*) AS c,
+      SUM(COALESCE(tokens_total, 0)) AS tokens,
+      SUM(
+        COALESCE(
+          active_duration,
+          CASE
+            WHEN ended_at IS NOT NULL THEN MAX(0, ended_at - started_at)
+            WHEN last_updated_at IS NOT NULL THEN MAX(0, last_updated_at - started_at)
+            ELSE 0
+          END
+        )
+      ) AS duration,
+      SUM(user_message_count) AS user_messages,
+      SUM(assistant_message_count) AS assistant_messages,
+      SUM(tool_invocation_count) AS tool_invocations
+    FROM sessions
+    """
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+    defer { sqlite3_finalize(stmt) }
+    guard sqlite3_step(stmt) == SQLITE_ROW else {
+      throw SessionIndexSQLiteStoreError.decodeFailed("Failed to read totals")
+    }
+    let sessions = Int(sqlite3_column_int(stmt, 0))
+    let tokens = Int(sqlite3_column_int64(stmt, 1))
+    let duration = sqlite3_column_double(stmt, 2)
+    let userMessages = Int(sqlite3_column_int64(stmt, 3))
+    let assistantMessages = Int(sqlite3_column_int64(stmt, 4))
+    let toolInvocations = Int(sqlite3_column_int64(stmt, 5))
+    return (sessions, tokens, duration, userMessages, assistantMessages, toolInvocations)
+  }
+
+  private func fetchSourceAggregates() throws -> [OverviewSourceAggregate] {
+    let sql = """
+    SELECT
+      source,
+      COUNT(*) AS c,
+      SUM(COALESCE(tokens_total, 0)) AS tokens,
+      SUM(
+        COALESCE(
+          active_duration,
+          CASE
+            WHEN ended_at IS NOT NULL THEN MAX(0, ended_at - started_at)
+            WHEN last_updated_at IS NOT NULL THEN MAX(0, last_updated_at - started_at)
+            ELSE 0
+          END
+        )
+      ) AS duration,
+      SUM(user_message_count) AS user_messages,
+      SUM(assistant_message_count) AS assistant_messages,
+      SUM(tool_invocation_count) AS tool_invocations
+    FROM sessions
+    GROUP BY source
+    """
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+    defer { sqlite3_finalize(stmt) }
+    var results: [OverviewSourceAggregate] = []
+    while sqlite3_step(stmt) == SQLITE_ROW {
+      guard
+        let kindText = columnText(stmt, index: 0),
+        let kind = decodeKind(kindText)
+      else { continue }
+      let count = Int(sqlite3_column_int64(stmt, 1))
+      let tokens = Int(sqlite3_column_int64(stmt, 2))
+      let duration = sqlite3_column_double(stmt, 3)
+      let userMessages = Int(sqlite3_column_int64(stmt, 4))
+      let assistantMessages = Int(sqlite3_column_int64(stmt, 5))
+      let toolInvocations = Int(sqlite3_column_int64(stmt, 6))
+      results.append(
+        OverviewSourceAggregate(
+          kind: kind,
+          sessionCount: count,
+          totalTokens: tokens,
+          totalDuration: duration,
+          userMessages: userMessages,
+          assistantMessages: assistantMessages,
+          toolInvocations: toolInvocations
+        )
+      )
+    }
+    return results
+  }
+
+  private func fetchDailyAggregates() throws -> [OverviewDailyPoint] {
+    let sql = """
+    SELECT
+      strftime('%Y-%m-%d', started_at, 'unixepoch', 'localtime') AS day,
+      source,
+      COUNT(*) AS c,
+      SUM(COALESCE(tokens_total, 0)) AS tokens,
+      SUM(
+        COALESCE(
+          active_duration,
+          CASE
+            WHEN ended_at IS NOT NULL THEN MAX(0, ended_at - started_at)
+            WHEN last_updated_at IS NOT NULL THEN MAX(0, last_updated_at - started_at)
+            ELSE 0
+          END
+        )
+      ) AS duration
+    FROM sessions
+    GROUP BY day, source
+    ORDER BY day ASC
+    """
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+    defer { sqlite3_finalize(stmt) }
+
+    var results: [OverviewDailyPoint] = []
+    let df = DateFormatter()
+    df.dateFormat = "yyyy-MM-dd"
+    df.locale = Locale(identifier: "en_US_POSIX")
+
+    while sqlite3_step(stmt) == SQLITE_ROW {
+      guard
+        let dayText = columnText(stmt, index: 0),
+        let dayDate = df.date(from: dayText),
+        let kindText = columnText(stmt, index: 1),
+        let kind = decodeKind(kindText)
+      else { continue }
+      let count = Int(sqlite3_column_int64(stmt, 2))
+      let tokens = Int(sqlite3_column_int64(stmt, 3))
+      let duration = sqlite3_column_double(stmt, 4)
+      results.append(
+        OverviewDailyPoint(
+          day: dayDate,
+          kind: kind,
+          sessionCount: count,
+          totalTokens: tokens,
+          totalDuration: duration
+        )
+      )
+    }
+    return results
+  }
+
+  private func countSessions() throws -> Int {
+    let sql = "SELECT COUNT(*) FROM sessions"
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      throw SessionIndexSQLiteStoreError.stepFailed(errorMessage)
+    }
+    defer { sqlite3_finalize(stmt) }
+    guard sqlite3_step(stmt) == SQLITE_ROW else {
+      throw SessionIndexSQLiteStoreError.decodeFailed("Failed to read session count")
+    }
+    return Int(sqlite3_column_int64(stmt, 0))
+  }
+}

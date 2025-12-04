@@ -1,63 +1,16 @@
 import Foundation
 import OSLog
 
-// Lightweight disk cache
-fileprivate actor DiskCache {
-  private struct Entry: Codable {
-    let path: String
-    let modificationTime: TimeInterval?
-    let summary: SessionSummary
-  }
-
-  private var map: [String: Entry] = [:]
-  private let url: URL
-
-  init() {
-    let fileManager = FileManager.default
-    let dir = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first!
-      .appendingPathComponent("CodMate", isDirectory: true)
-    try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
-    url = dir.appendingPathComponent("sessionIndex-v2.json")
-
-    // Load cache on init
-    if let data = try? Data(contentsOf: url),
-      let entries = try? JSONDecoder().decode([Entry].self, from: data)
-    {
-      map = Dictionary(uniqueKeysWithValues: entries.map { ($0.path, $0) })
-    }
-  }
-
-  func get(path: String, modificationDate: Date?) -> SessionSummary? {
-    guard let entry = map[path] else { return nil }
-    let mt = modificationDate?.timeIntervalSince1970
-    if entry.modificationTime == mt {
-      return entry.summary
-    }
-    return nil
-  }
-
-  func set(path: String, modificationDate: Date?, summary: SessionSummary) {
-    let mt = modificationDate?.timeIntervalSince1970
-    map[path] = Entry(path: path, modificationTime: mt, summary: summary)
-    // Simple save logic
-    let entries = Array(map.values)
-    if let data = try? JSONEncoder().encode(entries) {
-      try? data.write(to: url, options: .atomic)
-    }
-  }
-
-  func resetAll() {
-    map.removeAll()
-    try? FileManager.default.removeItem(at: url)
-  }
-}
-
 actor SessionIndexer {
   private let fileManager: FileManager
   private let decoder: JSONDecoder
   private let cache = NSCache<NSURL, CacheEntry>()
-  private let diskCache: DiskCache
+  private let sqliteStore: SessionIndexSQLiteStore
   private let logger = Logger(subsystem: "io.umate.codmate", category: "SessionIndexer")
+  /// Prevent concurrent refresh loops (scope-level gate)
+  private var isRefreshing = false
+  /// Tracks files whose token total is confirmed zero for a given mtime to avoid repeated rescans.
+  private var zeroTokenStable: [String: TimeInterval?] = [:]
   /// Avoid global mutable, non-Sendable formatter; create locally when needed
   nonisolated private static func makeTailTimestampFormatter() -> ISO8601DateFormatter {
     let f = ISO8601DateFormatter()
@@ -77,58 +30,102 @@ actor SessionIndexer {
 
   init(fileManager: FileManager = .default) {
     self.fileManager = fileManager
-    self.diskCache = DiskCache()
+    self.sqliteStore = SessionIndexSQLiteStore()
     decoder = FlexibleDecoders.iso8601Flexible()
   }
 
   func refreshSessions(root: URL, scope: SessionLoadScope) async throws -> [SessionSummary] {
+    // First, try cached meta fast path so repeated .all refreshes don't re-enumerate
+    if case .all = scope, let cached = await cachedAllSummariesFromMeta() {
+      return cached
+    }
+
+    guard !isRefreshing else {
+      logger.debug("Refresh skipped: already in progress for scope=\(String(describing: scope), privacy: .public)")
+      // When a refresh is already running, still try to surface cached data for ALL scope
+      if case .all = scope, let cached = await cachedAllSummariesFromMeta() {
+        return cached
+      }
+      return []
+    }
+    isRefreshing = true
+    defer { isRefreshing = false }
+
     let sessionFiles = try sessionFileURLs(at: root, scope: scope)
     logger.info(
       "Refreshing sessions under \(root.path, privacy: .public) scope=\(String(describing: scope), privacy: .public) count=\(sessionFiles.count)"
     )
     guard !sessionFiles.isEmpty else { return [] }
 
+    // Fast path: if all files have up-to-date summaries in cache/SQLite, return immediately
+    var summaries: [SessionSummary] = []
+    summaries.reserveCapacity(sessionFiles.count)
+    var pending: [(url: URL, modificationDate: Date?, fileSize: Int?)] = []
+
+    for url in sessionFiles {
+      let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey])
+      guard values.isRegularFile == true else { continue }
+      let mdate = values.contentModificationDate
+      let fsize = values.fileSize
+      if let cached = cachedSummary(for: url as NSURL, modificationDate: mdate) {
+        if shouldRecomputeTokens(for: url.path, modificationDate: mdate, summary: cached) {
+          pending.append((url, mdate, fsize))
+        } else {
+          summaries.append(cached)
+        }
+        continue
+      }
+      if
+        let disk = try? await sqliteStore.fetch(
+          path: url.path,
+          modificationDate: mdate,
+          fileSize: fsize.flatMap { UInt64($0) })
+      {
+        if shouldRecomputeTokens(for: url.path, modificationDate: mdate, summary: disk) {
+          pending.append((url, mdate, fsize))
+        } else {
+          store(summary: disk, for: url as NSURL, modificationDate: mdate)
+          summaries.append(disk)
+        }
+        continue
+      }
+      pending.append((url, mdate, fsize))
+    }
+
+    // If everything hit cache, short-circuit
+    if pending.isEmpty {
+      if case .all = scope {
+        do {
+          try await sqliteStore.setMeta(lastFullIndexAt: Date(), sessionCount: sessionFiles.count)
+          logger.info("SessionIndexer meta updated from cache-only path count=\(sessionFiles.count, privacy: .public)")
+        } catch {
+          logger.error("Failed to set meta: \(error.localizedDescription, privacy: .public)")
+        }
+      }
+      return summaries
+    }
+
     let cpuCount = ProcessInfo.processInfo.processorCount
     let workerCount = max(2, cpuCount / 2)
-    var summaries: [SessionSummary] = []
     var firstError: Error?
     summaries.reserveCapacity(sessionFiles.count)
 
     await withTaskGroup(of: Result<SessionSummary?, Error>.self) { group in
-      var iterator = sessionFiles.makeIterator()
+      var iterator = pending.makeIterator()
 
       func addNextTasks(_ n: Int) {
         for _ in 0..<n {
-          guard let url = iterator.next() else { return }
+              guard let url = iterator.next() else { return }
           group.addTask { [weak self] in
             guard let self else { return .success(nil) }
             do {
-              let values = try url.resourceValues(forKeys: [
-                .contentModificationDateKey, .fileSizeKey, .isRegularFileKey,
-              ])
-              guard values.isRegularFile == true else { return .success(nil) }
-
-              // In-memory cache
-              if let cached = await self.cachedSummary(
-                for: url as NSURL, modificationDate: values.contentModificationDate)
-              {
-                return .success(cached)
-              }
-              // Disk cache
-              if let disk = await self.diskCache.get(
-                path: url.path, modificationDate: values.contentModificationDate)
-              {
-                await self.store(
-                  summary: disk, for: url as NSURL,
-                  modificationDate: values.contentModificationDate)
-                return .success(disk)
-              }
+              let (url, modificationDate, fileSize) = url
 
               var builder = SessionSummaryBuilder()
-              if let size = values.fileSize { builder.setFileSize(UInt64(size)) }
+              if let size = fileSize { builder.setFileSize(UInt64(size)) }
               // Seed updatedAt by fs metadata to avoid full scan for recency
               if let lastUpdated = self.lastUpdatedTimestamp(
-                for: url, modificationDate: values.contentModificationDate)
+                for: url, modificationDate: modificationDate)
               {
                 builder.seedLastUpdated(lastUpdated)
               }
@@ -136,12 +133,26 @@ actor SessionIndexer {
                 let summary = try await self.buildSummaryFast(
                   for: url, builder: &builder)
               else { return .success(nil) }
+              // Track zero-token stability to avoid re-scans next time if still zero
+              await self.updateZeroTokenStable(
+                path: url.path, modificationDate: modificationDate, tokens: summary.actualTotalTokens)
+              // Persist to SQLite (best-effort)
+              do {
+                try await self.sqliteStore.upsert(
+                  summary: summary,
+                  project: nil,
+                  fileModificationTime: modificationDate,
+                  fileSize: fileSize.flatMap { UInt64($0) },
+                  tokenBreakdown: nil,
+                  parseError: nil)
+              } catch {
+                self.logger.error(
+                  "Failed to persist session summary: \(error.localizedDescription, privacy: .public) path=\(url.path, privacy: .public)"
+                )
+              }
               await self.store(
                 summary: summary, for: url as NSURL,
-                modificationDate: values.contentModificationDate)
-              await self.diskCache.set(
-                path: url.path, modificationDate: values.contentModificationDate,
-                summary: summary)
+                modificationDate: modificationDate)
               return .success(summary)
             } catch {
               return .failure(error)
@@ -166,6 +177,21 @@ actor SessionIndexer {
       }
     }
 
+    if case .all = scope {
+      do {
+        try await sqliteStore.setMeta(lastFullIndexAt: Date(), sessionCount: sessionFiles.count)
+        logger.info(
+          "SessionIndexer refresh complete. summaries=\(summaries.count, privacy: .public) files=\(sessionFiles.count, privacy: .public)"
+        )
+      } catch {
+        logger.error("Failed to set meta after refresh: \(error.localizedDescription, privacy: .public)")
+      }
+    } else {
+      logger.info(
+        "SessionIndexer refresh complete (partial scope). summaries=\(summaries.count, privacy: .public) pending=0"
+      )
+    }
+
     if summaries.isEmpty, let error = firstError {
       throw error
     }
@@ -183,7 +209,37 @@ actor SessionIndexer {
   /// Clear both in-memory and on-disk session index caches.
   func resetAllCaches() async {
     cache.removeAllObjects()
-    await diskCache.resetAll()
+    try? await sqliteStore.reset()
+  }
+
+  /// Fetch aggregated overview metrics from SQLite cache (all sources).
+  func fetchOverviewAggregate() async -> OverviewAggregate? {
+    return try? await sqliteStore.fetchOverviewAggregate()
+  }
+
+  /// Current cache coverage (sources present + meta).
+  func currentCoverage() async -> SessionIndexCoverage? {
+    return try? await sqliteStore.fetchCoverage()
+  }
+
+  /// Cache externally provided session summaries (e.g., Claude/Gemini providers) into SQLite.
+  func cacheExternalSummaries(_ summaries: [SessionSummary]) async {
+    guard !summaries.isEmpty else { return }
+    for summary in summaries {
+      do {
+        try await sqliteStore.upsert(
+          summary: summary,
+          project: nil,
+          fileModificationTime: nil,
+          fileSize: summary.fileSizeBytes,
+          tokenBreakdown: nil,
+          parseError: nil
+        )
+      } catch {
+        logger.error("Failed to cache external summary \(summary.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+      }
+    }
+    logger.info("Cached external summaries count=\(summaries.count, privacy: .public)")
   }
 
   // MARK: - Private
@@ -198,6 +254,31 @@ actor SessionIndexer {
     return nil
   }
 
+  private func shouldRecomputeTokens(
+    for path: String, modificationDate: Date?, summary: SessionSummary
+  ) -> Bool {
+    if summary.actualTotalTokens > 0 { return false }
+    switch summary.source.baseKind {
+    case .codex, .gemini:
+      let key = path
+      let mt = modificationDate?.timeIntervalSince1970
+      if let stable = zeroTokenStable[key], stable == mt {
+        return false
+      }
+      return true
+    case .claude:
+      return false
+    }
+  }
+
+  private func updateZeroTokenStable(path: String, modificationDate: Date?, tokens: Int) {
+    if tokens > 0 {
+      zeroTokenStable.removeValue(forKey: path)
+    } else {
+      zeroTokenStable[path] = modificationDate?.timeIntervalSince1970
+    }
+  }
+
   private func store(summary: SessionSummary, for key: NSURL, modificationDate: Date?) {
     let entry = CacheEntry(modificationDate: modificationDate, summary: summary)
     cache.setObject(entry, forKey: key)
@@ -209,6 +290,20 @@ actor SessionIndexer {
     return readTailTimestamp(url: url)
   }
 
+  /// Cached fast path: return all summaries from SQLite meta without touching the filesystem.
+  private func cachedAllSummariesFromMeta() async -> [SessionSummary]? {
+    guard let meta = try? await sqliteStore.fetchMeta(), meta.sessionCount > 0 else {
+      return nil
+    }
+    let records = (try? await sqliteStore.fetchAll()) ?? []
+    if records.isEmpty {
+      return nil
+    }
+    logger.info("SessionIndexer meta hit: sessions=\(records.count, privacy: .public)")
+    return records.map(\.summary)
+  }
+
+  /// Fast tail scan to retrieve latest token_count for Codex/Gemini sessions.
   private func sessionFileURLs(at root: URL, scope: SessionLoadScope) throws -> [URL] {
     var urls: [URL] = []
     guard let enumeratorURL = scopeBaseURL(root: root, scope: scope) else {
@@ -308,6 +403,44 @@ actor SessionIndexer {
 
   /// Fast index: record the last update timestamp per file to avoid repeated scans
   private var updatedDateIndex: [String: Date] = [:]
+  /// Tail token scan for codex/gemini when tokens are zero (avoids full reparse)
+  private func readTailTotalTokens(url: URL) -> Int? {
+    let chunkSize = 128 * 1024
+    guard
+      let handle = try? FileHandle(forReadingFrom: url)
+    else { return nil }
+    defer { try? handle.close() }
+
+    do {
+      let fileSize = try handle.seekToEnd()
+      let offset = fileSize > chunkSize ? fileSize - UInt64(chunkSize) : 0
+      try handle.seek(toOffset: offset)
+      guard let data = try handle.readToEnd(), !data.isEmpty else { return nil }
+      let newline: UInt8 = 0x0A
+      let carriageReturn: UInt8 = 0x0D
+      for var slice in data.split(separator: newline, omittingEmptySubsequences: true).reversed() {
+        if slice.last == carriageReturn { slice = slice.dropLast() }
+        guard !slice.isEmpty else { continue }
+        if let row = try? decoder.decode(SessionRow.self, from: Data(slice)) {
+          if case let .eventMessage(payload) = row.kind, payload.type == "token_count" {
+            if let msg = payload.message, let range = msg.range(of: "total: ") {
+              let numStr = msg[range.upperBound...].prefix(while: { $0.isNumber })
+              if let val = Int(numStr) { return val }
+            }
+            if let info = payload.info,
+               case .object(let dict) = info,
+               case .number(let total) = dict["total"]
+            {
+              return Int(total)
+            }
+          }
+        }
+      }
+    } catch {
+      return nil
+    }
+    return nil
+  }
 
   /// Build the date index for the Updated dimension (async in the background)
   func buildUpdatedIndex(root: URL) async -> [String: Date] {
@@ -329,10 +462,13 @@ actor SessionIndexer {
           guard let self else { return nil }
           // Try disk cache first
           let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
-          if let cached = await self.diskCache.get(
-            path: url.path,
-            modificationDate: values?.contentModificationDate
-          ), let updated = cached.lastUpdatedAt {
+          if
+            let cached = try? await self.sqliteStore.fetch(
+              path: url.path,
+              modificationDate: values?.contentModificationDate,
+              fileSize: nil),
+            let updated = cached.lastUpdatedAt
+          {
             return (url.path, updated)
           }
           // Otherwise read tail timestamp quickly
@@ -447,7 +583,9 @@ actor SessionIndexer {
           guard let self else { return nil }
           let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
           let m = values?.contentModificationDate
-          if let cached = await self.diskCache.get(path: url.path, modificationDate: m),
+          if
+            let cached = try? await self.sqliteStore.fetch(
+              path: url.path, modificationDate: m, fileSize: nil),
             !cached.cwd.isEmpty
           {
             return (cached.cwd, 1)
@@ -520,6 +658,10 @@ actor SessionIndexer {
       let fallbackTokens = snapshot.totalTokens
     {
       builder.seedTotalTokens(fallbackTokens)
+    }
+    // Tail token_count scan for Codex/Gemini to avoid full reparse when tokens are 0.
+    if builder.totalTokens == 0, let tail = readTailTotalTokens(url: url) {
+      builder.seedTotalTokens(tail)
     }
 
     if let result = builder.build(for: url) { return result }
@@ -594,8 +736,19 @@ actor SessionIndexer {
 
     // Persist to in-memory and disk caches keyed by mtime
     store(summary: enriched, for: url as NSURL, modificationDate: values.contentModificationDate)
-    await diskCache.set(
-      path: url.path, modificationDate: values.contentModificationDate, summary: enriched)
+    do {
+      try await sqliteStore.upsert(
+        summary: enriched,
+        project: nil,
+        fileModificationTime: values.contentModificationDate,
+        fileSize: values.fileSize.flatMap { UInt64($0) },
+        tokenBreakdown: nil,
+        parseError: nil)
+    } catch {
+      logger.error(
+        "Failed to persist enriched summary: \(error.localizedDescription, privacy: .public) path=\(url.path, privacy: .public)"
+      )
+    }
     return enriched
   }
 
@@ -743,5 +896,15 @@ actor SessionIndexer {
       total += 1
     }
     return total
+  }
+
+  /// Expose current meta for UI/diagnostics (non-mutating).
+  func currentMeta() async -> SessionIndexMeta? {
+    return try? await sqliteStore.fetchMeta()
+  }
+
+  /// Returns cached summaries when a full index already exists.
+  func cachedAllSummaries() async -> [SessionSummary]? {
+    return await cachedAllSummariesFromMeta()
   }
 }

@@ -25,8 +25,22 @@ actor GeminiSessionProvider {
   private var canonicalURLById: [String: URL] = [:]
   private var rowsCacheBySessionId: [String: [SessionRow]] = [:]
   private var logCacheByHash: [String: [String: [GeminiLogEntry]]] = [:]
+  private var aggregatedCacheByHash: [String: AggregatedCacheEntry] = [:]
   private let logDateFormatter: ISO8601DateFormatter
   private let fallbackLogFormatter: ISO8601DateFormatter
+
+  private struct AggregatedCacheEntry {
+    let signature: HashSignature
+    let sessions: [AggregatedSession]
+  }
+
+  private struct HashSignature: Equatable {
+    let fileCount: Int
+    let chatsTotalSize: UInt64
+    let latestChatMtime: Date?
+    let logSize: UInt64
+    let logMtime: Date?
+  }
 
   init(projectsStore: ProjectsStore, fileManager: FileManager = .default) {
     self.projectsStore = projectsStore
@@ -62,7 +76,7 @@ actor GeminiSessionProvider {
         hash.range(of: "^[0-9a-f]+$", options: .regularExpression) != nil
       else { continue }
       let resolvedPath = await resolveProjectPath(forHash: hash)
-      let aggregated = aggregateSessions(
+      let aggregated = aggregatedSessions(
         forHash: hash,
         hashURL: hashURL,
         resolvedProjectPath: resolvedPath,
@@ -95,7 +109,7 @@ actor GeminiSessionProvider {
         hash.range(of: "^[0-9a-f]+$", options: .regularExpression) != nil
       else { continue }
       let resolved = await resolveProjectPath(forHash: hash)
-      let aggregated = aggregateSessions(
+      let aggregated = aggregatedSessions(
         forHash: hash,
         hashURL: hashURL,
         resolvedProjectPath: resolved,
@@ -120,7 +134,7 @@ actor GeminiSessionProvider {
         hash.range(of: "^[0-9a-f]+$", options: .regularExpression) != nil
       else { continue }
       let resolved = await resolveProjectPath(forHash: hash)
-      let aggregated = aggregateSessions(
+      let aggregated = aggregatedSessions(
         forHash: hash,
         hashURL: hashURL,
         resolvedProjectPath: resolved,
@@ -181,7 +195,7 @@ actor GeminiSessionProvider {
     guard let hash = directoryHash(for: directory) else { return [] }
     guard let tmpRoot else { return [] }
     let hashURL = tmpRoot.appendingPathComponent(hash, isDirectory: true)
-    let aggregated = aggregateSessions(
+    let aggregated = aggregatedSessions(
       forHash: hash,
       hashURL: hashURL,
       resolvedProjectPath: directory,
@@ -277,7 +291,7 @@ actor GeminiSessionProvider {
     else { return nil }
     let hashURL = tmpRoot.appendingPathComponent(hash, isDirectory: true)
     let resolved = await resolveProjectPath(forHash: hash)
-    let aggregated = aggregateSessions(
+    let aggregated = aggregatedSessions(
       forHash: hash,
       hashURL: hashURL,
       resolvedProjectPath: resolved,
@@ -289,32 +303,35 @@ actor GeminiSessionProvider {
     return rowsCacheBySessionId[summary.id]
   }
 
-  private func aggregateSessions(
+  private func aggregatedSessions(
     forHash hash: String,
     hashURL: URL,
     resolvedProjectPath: String?,
     cacheResults: Bool
   ) -> [AggregatedSession] {
-    let chatsDir = hashURL.appendingPathComponent("chats", isDirectory: true)
-    var isDir: ObjCBool = false
-    guard fileManager.fileExists(atPath: chatsDir.path, isDirectory: &isDir), isDir.boolValue else {
-      return []
+    guard let fileInfo = chatFilesAndSignature(forHash: hash, hashURL: hashURL) else { return [] }
+    if let cached = aggregatedCacheByHash[hash], cached.signature == fileInfo.signature {
+      if cacheResults {
+        for session in cached.sessions {
+          rowsCacheBySessionId[session.summary.id] = session.rows
+          canonicalURLById[session.summary.id] = session.primaryFileURL
+        }
+      }
+      return cached.sessions
     }
-    guard let files = try? fileManager.contentsOfDirectory(
-      at: chatsDir,
-      includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
-      options: [.skipsHiddenFiles])
-    else { return [] }
 
     var segmentsBySession: [String: [GeminiParsedLog]] = [:]
-    for file in files where file.pathExtension.lowercased() == "json" {
-      guard let parsed = parser.parse(at: file, projectHash: hash, resolvedProjectPath: resolvedProjectPath)
+    for info in fileInfo.files where info.url.pathExtension.lowercased() == "json" {
+      guard let parsed = parser.parse(
+        at: info.url, projectHash: hash, resolvedProjectPath: resolvedProjectPath)
       else { continue }
       segmentsBySession[parsed.summary.id, default: []].append(parsed)
     }
     guard !segmentsBySession.isEmpty else { return [] }
 
-    if cacheResults { logCacheByHash.removeValue(forKey: hash) }
+    if cacheResults {
+      logCacheByHash.removeValue(forKey: hash)
+    }
     let logEntries = logEntriesBySession(forHash: hash)
     var results: [AggregatedSession] = []
     for (sessionId, segments) in segmentsBySession {
@@ -327,6 +344,10 @@ actor GeminiSessionProvider {
         rowsCacheBySessionId[aggregated.summary.id] = aggregated.rows
         canonicalURLById[aggregated.summary.id] = aggregated.primaryFileURL
       }
+    }
+
+    if cacheResults {
+      aggregatedCacheByHash[hash] = AggregatedCacheEntry(signature: fileInfo.signature, sessions: results)
     }
     return results
   }
@@ -368,6 +389,63 @@ actor GeminiSessionProvider {
       .overridingSource(.geminiLocal)
       .overridingCounts(userMessages: conversationCount, assistantMessages: assistantMessages)
     return AggregatedSession(summary: summary, rows: normalized, primaryFileURL: representative.summary.fileURL)
+  }
+
+  private struct ChatFileInfo {
+    let url: URL
+    let modificationDate: Date?
+    let size: UInt64
+  }
+
+  private func chatFilesAndSignature(
+    forHash hash: String,
+    hashURL: URL
+  ) -> (files: [ChatFileInfo], signature: HashSignature)? {
+    let chatsDir = hashURL.appendingPathComponent("chats", isDirectory: true)
+    var isDir: ObjCBool = false
+    guard fileManager.fileExists(atPath: chatsDir.path, isDirectory: &isDir), isDir.boolValue else {
+      return nil
+    }
+    guard let files = try? fileManager.contentsOfDirectory(
+      at: chatsDir,
+      includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
+      options: [.skipsHiddenFiles])
+    else { return nil }
+
+    var infos: [ChatFileInfo] = []
+    var totalSize: UInt64 = 0
+    var latestMtime: Date?
+    var fileCount = 0
+
+    for file in files where file.pathExtension.lowercased() == "json" {
+      guard let values = try? file.resourceValues(
+        forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]),
+        values.isRegularFile == true
+      else { continue }
+      fileCount += 1
+      let size = UInt64(values.fileSize ?? 0)
+      totalSize += size
+      if let m = values.contentModificationDate {
+        if latestMtime == nil || m > latestMtime! { latestMtime = m }
+      }
+      infos.append(ChatFileInfo(url: file, modificationDate: values.contentModificationDate, size: size))
+    }
+
+    let logURL = hashURL.appendingPathComponent("logs.json", isDirectory: false)
+    let logValues = try? logURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+    let logSize = UInt64(logValues?.fileSize ?? 0)
+    let logMtime = logValues?.contentModificationDate
+    if let logMtime, latestMtime == nil || logMtime > latestMtime! {
+      latestMtime = logMtime
+    }
+
+    let signature = HashSignature(
+      fileCount: fileCount,
+      chatsTotalSize: totalSize,
+      latestChatMtime: latestMtime,
+      logSize: logSize,
+      logMtime: logMtime)
+    return (infos, signature)
   }
 
   private func rowsFromLogs(_ logEntries: [GeminiLogEntry]) -> [SessionRow] {

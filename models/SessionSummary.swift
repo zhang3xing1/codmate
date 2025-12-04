@@ -358,6 +358,16 @@ enum SessionSource: Hashable, Sendable {
     }
 }
 
+extension SessionSource.Kind {
+    var displayName: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claude: return "Claude"
+        case .gemini: return "Gemini"
+        }
+    }
+}
+
 extension SessionSource: Codable {
     private enum CodingKeys: String, CodingKey {
         case kind

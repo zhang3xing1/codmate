@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import CryptoKit
 import Foundation
+import OSLog
 
 #if canImport(Darwin)
   import Darwin
@@ -176,6 +177,11 @@ final class SessionListViewModel: ObservableObject {
   private var filterTask: Task<Void, Never>?
   private var filterDebounceTask: Task<Void, Never>?
   private var filterGeneration: UInt64 = 0
+  private var pendingApplyFilters = false
+  private var lastFilterSnapshotHash: Int?
+  /// Debounce refresh triggers to avoid repeated full enumerations
+  private var refreshDebounceTask: Task<Void, Never>?
+  private var lastRefreshAt: Date?
   struct VisibleCountKey: Equatable {
     var dimension: DateDimension
     var selectedDay: Date?
@@ -197,6 +203,7 @@ final class SessionListViewModel: ObservableObject {
   private var geminiUsageTask: Task<Void, Never>?
   private var pathTreeRefreshTask: Task<Void, Never>?
   private var calendarRefreshTasks: [String: Task<Void, Never>] = [:]
+  private var deferredExternalMergeTask: Task<Void, Never>?
   private var cancellables = Set<AnyCancellable>()
   private let pathTreeStore = PathTreeStore()
   private var lastPathCounts: [String: Int] = [:]
@@ -228,6 +235,11 @@ final class SessionListViewModel: ObservableObject {
   // Live activity indicators
   @Published private(set) var activeUpdatingIDs: Set<String> = []
   @Published private(set) var awaitingFollowupIDs: Set<String> = []
+  // Index meta for diagnostics/UI state (full cache completion marker)
+  @Published private(set) var indexMeta: SessionIndexMeta?
+  @Published private(set) var cacheCoverage: SessionIndexCoverage?
+  private let diagLogger = Logger(subsystem: "io.umate.codmate", category: "SessionListVM")
+  private func ts() -> Double { Date().timeIntervalSince1970 }
 
   // Persist Review (Git Changes) panel UI state per session so toggling
   // between Conversation, Terminal and Review preserves context.
@@ -353,6 +365,11 @@ final class SessionListViewModel: ObservableObject {
   func scheduleApplyFilters() {
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
+      // Coalesce rapid triggers: if a filter task is in flight, mark pending and return.
+      if self.filterTask != nil {
+        self.pendingApplyFilters = true
+        return
+      }
       self.applyFilters()
     }
   }
@@ -562,6 +579,22 @@ final class SessionListViewModel: ObservableObject {
     // Initialize workspace view model after self is fully initialized
     self.workspaceVM = ProjectWorkspaceViewModel(sessionListViewModel: self)
 
+    // Prime cached index state early so sidebar counts/overview can render without a 0 flash.
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      let meta = await self.indexer.currentMeta()
+      let coverage = await self.indexer.currentCoverage()
+      if let coverage {
+        self.cacheCoverage = coverage
+        self.globalSessionCount = coverage.sessionCount
+        self.diagLogger.log("prime index coverage count=\(coverage.sessionCount, privacy: .public) sources=\(coverage.sources, privacy: .public) ts=\(self.ts(), format: .fixed(precision: 3))")
+      } else if let meta {
+        self.indexMeta = meta
+        self.globalSessionCount = meta.sessionCount
+        self.diagLogger.log("prime index meta count=\(meta.sessionCount, privacy: .public) ts=\(self.ts(), format: .fixed(precision: 3))")
+      }
+    }
+
     configureDirectoryMonitor()
     configureClaudeDirectoryMonitor()
     Task { await loadProjects() }
@@ -655,9 +688,12 @@ final class SessionListViewModel: ObservableObject {
     if force {
       invalidateEnrichmentCache(for: selectedDay)
     }
+    let refreshBegan = Date()
     defer {
       if token == activeRefreshToken {
         isLoading = false
+        let elapsed = Date().timeIntervalSince(refreshBegan)
+      diagLogger.log("refreshSessions done in \(elapsed, format: .fixed(precision: 3))s sessions=\(self.allSessions.count, privacy: .public) ts=\(self.ts(), format: .fixed(precision: 3))")
       }
     }
 
@@ -666,33 +702,17 @@ final class SessionListViewModel: ObservableObject {
 
     do {
       let scope = currentScope()
+      diagLogger.log("refreshSessions start force=\(force, privacy: .public) scope=\(String(describing: scope), privacy: .public) ts=\(self.ts(), format: .fixed(precision: 3))")
       let enabledRemoteHosts = preferences.enabledRemoteHosts
       async let codexTask = indexer.refreshSessions(
         root: preferences.sessionsRoot, scope: scope)
-      async let claudeTask = claudeProvider.sessions(scope: scope)
-      async let geminiTask = geminiProvider.sessions(scope: scope)
+      // External providers: defer to background merge; do not block initial render.
+      _ = Task.detached { [] as [SessionSummary] }
+      _ = Task.detached { [] as [SessionSummary] }
+      _ = Task.detached { [] as [SessionSummary] }
+      _ = Task.detached { [] as [SessionSummary] }
 
       var sessions = try await codexTask
-      let claudeSessions = await claudeTask
-      if !claudeSessions.isEmpty {
-        let existingIDs = Set(sessions.map(\.id))
-        let filteredClaude = claudeSessions.filter { !existingIDs.contains($0.id) }
-        sessions.append(contentsOf: filteredClaude)
-      }
-      let geminiSessions = await geminiTask
-      if !geminiSessions.isEmpty {
-        let existingIDs = Set(sessions.map(\.id))
-        let filteredGemini = geminiSessions.filter { !existingIDs.contains($0.id) }
-        sessions.append(contentsOf: filteredGemini)
-      }
-      if !enabledRemoteHosts.isEmpty {
-        let remoteCodex = await remoteProvider.codexSessions(
-          scope: scope, enabledHosts: enabledRemoteHosts)
-        if !remoteCodex.isEmpty { sessions.append(contentsOf: remoteCodex) }
-        let remoteClaude = await remoteProvider.claudeSessions(
-          scope: scope, enabledHosts: enabledRemoteHosts)
-        if !remoteClaude.isEmpty { sessions.append(contentsOf: remoteClaude) }
-      }
       if !sessions.isEmpty {
         var seen: Set<String> = []
         var unique: [SessionSummary] = []
@@ -758,6 +778,14 @@ final class SessionListViewModel: ObservableObject {
         let tree = counts.buildPathTreeFromCounts()
         await MainActor.run { self.pathTreeRootPublished = tree }
       }
+      Task { [weak self] in
+        guard let self else { return }
+        self.indexMeta = await self.indexer.currentMeta()
+        self.cacheCoverage = await self.indexer.currentCoverage()
+        self.diagLogger.log("refreshSessions meta/coverage updated metaCount=\(self.indexMeta?.sessionCount ?? -1, privacy: .public) coverageCount=\(self.cacheCoverage?.sessionCount ?? -1, privacy: .public) ts=\(self.ts(), format: .fixed(precision: 3))")
+      }
+      // External providers: schedule delayed, so cold start is cache-only.
+      scheduleDeferredExternalMerge(scope: scope, enabledHosts: Array(enabledRemoteHosts))
       refreshCodexUsageStatus()
       if claudeUsageAutoRefreshEnabled {
         refreshClaudeUsageStatus()
@@ -769,6 +797,18 @@ final class SessionListViewModel: ObservableObject {
         errorMessage = error.localizedDescription
       }
     }
+  }
+
+  /// Deduplicate provider sessions against existing ones by id.
+  private func dedupExtraSessions(base: [SessionSummary], extras: [SessionSummary]) -> [SessionSummary] {
+    guard !extras.isEmpty else { return [] }
+    let existingIDs = Set(base.map(\.id))
+    return extras.filter { !existingIDs.contains($0.id) }
+  }
+
+  /// Aggregated overview metrics from cached index (all sources).
+  func fetchOverviewAggregate() async -> OverviewAggregate? {
+    await indexer.fetchOverviewAggregate()
   }
 
   private func registerActivityHeartbeat(previous: [SessionSummary], current: [SessionSummary]) {
@@ -838,6 +878,8 @@ final class SessionListViewModel: ObservableObject {
     codexUsageTask = nil
     geminiUsageTask?.cancel()
     geminiUsageTask = nil
+    deferredExternalMergeTask?.cancel()
+    deferredExternalMergeTask = nil
     pathTreeRefreshTask?.cancel()
     pathTreeRefreshTask = nil
     for task in calendarRefreshTasks.values { task.cancel() }
@@ -967,6 +1009,8 @@ final class SessionListViewModel: ObservableObject {
     let sessionsRoot = preferences.sessionsRoot
     Task { [weak self, monthStart, dimension, enabledHosts, sessionsRoot] in
       guard let self else { return }
+      let started = Date()
+      self.diagLogger.log("calendarCounts start month=\(key, privacy: .public) ts=\(self.ts(), format: .fixed(precision: 3))")
       var merged = await self.indexer.computeCalendarCounts(
         root: sessionsRoot, monthStart: monthStart, dimension: dimension)
       if !enabledHosts.isEmpty {
@@ -995,6 +1039,8 @@ final class SessionListViewModel: ObservableObject {
       await MainActor.run {
         self.monthCountsCache[self.cacheKey(monthStart, dimension)] = merged
       }
+      let elapsed = Date().timeIntervalSince(started)
+      self.diagLogger.log("calendarCounts done month=\(key, privacy: .public) days=\(merged.count, privacy: .public) in \(elapsed, format: .fixed(precision: 3))s ts=\(self.ts(), format: .fixed(precision: 3))")
     }
   }
 
@@ -1023,6 +1069,8 @@ final class SessionListViewModel: ObservableObject {
     pathTreeRefreshTask?.cancel()
     pathTreeRefreshTask = Task { [weak self] in
       guard let self else { return }
+      let started = Date()
+      diagLogger.log("pathTreeRefresh start ts=\(ts(), format: .fixed(precision: 3))")
       defer { self.pathTreeRefreshTask = nil }
       var counts = self.cwdCounts(for: self.allSessions)
       self.lastPathCounts = counts
@@ -1041,6 +1089,8 @@ final class SessionListViewModel: ObservableObject {
       }
       let tree = await self.pathTreeStore.applySnapshot(counts: counts)
       await MainActor.run { self.pathTreeRootPublished = tree }
+      let elapsed = Date().timeIntervalSince(started)
+      diagLogger.log("pathTreeRefresh done in \(elapsed, format: .fixed(precision: 3))s counts=\(counts.count, privacy: .public) ts=\(ts(), format: .fixed(precision: 3))")
     }
   }
 
@@ -1391,6 +1441,8 @@ final class SessionListViewModel: ObservableObject {
     filterGeneration &+= 1
     let generation = filterGeneration
     let snapshot = makeFilterSnapshot()
+    let started = Date()
+    logApplyFiltersStart(reason: snapshot.reasonDescription)
 
     filterTask = Task { [weak self] in
       guard let self else { return }
@@ -1401,12 +1453,92 @@ final class SessionListViewModel: ObservableObject {
       let result = await computeTask.value
       guard !Task.isCancelled else { return }
       guard self.filterGeneration == generation else { return }
+
+      // Snapshot hash to skip duplicate work within a short window.
+      let snapshotHash = snapshot.digest
+      if let lastHash = self.lastFilterSnapshotHash, lastHash == snapshotHash {
+        self.logApplyFiltersEnd(
+          reason: snapshot.reasonDescription + " (skipped same snapshot)",
+          elapsed: 0,
+          sections: self.sections.count,
+          sessions: self.allSessions.count
+        )
+        self.pendingApplyFilters = false
+        self.filterTask = nil
+        return
+      }
+      self.lastFilterSnapshotHash = snapshotHash
+
       if !result.newCanonicalEntries.isEmpty {
         self.canonicalCwdCache.merge(result.newCanonicalEntries) { _, new in new }
       }
       // Use pre-computed sections from background task
       self.sections = result.sections
-      self.filterTask = nil
+      let elapsed = Date().timeIntervalSince(started)
+      self.logApplyFiltersEnd(
+        reason: snapshot.reasonDescription,
+        elapsed: elapsed,
+        sections: result.sections.count,
+        sessions: result.totalSessions
+      )
+      // If more filter requests were queued while this task ran, flush one more apply.
+      if self.pendingApplyFilters {
+        self.pendingApplyFilters = false
+        // Schedule on next runloop to avoid deep recursion.
+        DispatchQueue.main.async { [weak self] in
+          self?.applyFilters()
+        }
+      } else {
+        self.filterTask = nil
+      }
+    }
+  }
+
+  private func scheduleDeferredExternalMerge(scope: SessionLoadScope, enabledHosts: [String]) {
+    deferredExternalMergeTask?.cancel()
+    // Delay to let UI settle; we fetch external sessions after 5s.
+    deferredExternalMergeTask = Task { [weak self] in
+      guard let self else { return }
+      try? await Task.sleep(nanoseconds: 5_000_000_000)
+      guard !Task.isCancelled else { return }
+      let providerStarted = Date()
+      async let claudeTask = claudeProvider.sessions(scope: scope)
+      async let geminiTask = geminiProvider.sessions(scope: scope)
+      let remoteCodexTask: Task<[SessionSummary], Never> = enabledHosts.isEmpty
+        ? Task { [] }
+        : Task { [weak self] in
+          guard let self else { return [] }
+          return await self.remoteProvider.codexSessions(scope: scope, enabledHosts: Set(enabledHosts))
+        }
+      let remoteClaudeTask: Task<[SessionSummary], Never> = enabledHosts.isEmpty
+        ? Task { [] }
+        : Task { [weak self] in
+          guard let self else { return [] }
+          return await self.remoteProvider.claudeSessions(scope: scope, enabledHosts: Set(enabledHosts))
+        }
+
+      let claudeSessions = await claudeTask
+      let geminiSessions = await geminiTask
+      let remoteCodex = await remoteCodexTask.value
+      let remoteClaude = await remoteClaudeTask.value
+      let afterFetch = Date()
+
+      let extra = self.dedupExtraSessions(
+        base: self.allSessions,
+        extras: claudeSessions + geminiSessions + remoteCodex + remoteClaude)
+      if !extra.isEmpty {
+        await self.indexer.cacheExternalSummaries(extra)
+        await MainActor.run {
+          self.mergeAndApply(extra)
+        }
+      }
+      let elapsed = afterFetch.timeIntervalSince(providerStarted)
+      self.diagLogger.log("provider merge (delayed) fetched claude=\(claudeSessions.count, privacy: .public) gemini=\(geminiSessions.count, privacy: .public) remoteCodex=\(remoteCodex.count, privacy: .public) remoteClaude=\(remoteClaude.count, privacy: .public) in \(elapsed, format: .fixed(precision: 3))s ts=\(self.ts(), format: .fixed(precision: 3))")
+      Task { [weak self] in
+        guard let self else { return }
+        self.cacheCoverage = await self.indexer.currentCoverage()
+        self.diagLogger.log("coverage refresh after delayed merge count=\(self.cacheCoverage?.sessionCount ?? -1, privacy: .public) sources=\(self.cacheCoverage?.sources ?? [], privacy: .public) ts=\(self.ts(), format: .fixed(precision: 3))")
+      }
     }
   }
 
@@ -1461,7 +1593,8 @@ final class SessionListViewModel: ObservableObject {
       canonicalCache: canonicalCwdCache,
       dayIndex: dayIndexMap,
       dayCoverage: updatedMonthCoverage,
-      dayDescriptors: dayDescriptors
+      dayDescriptors: dayDescriptors,
+      reasonDescription: "filters: projects=\(selectedProjectIDs.count) path=\(selectedPath ?? "nil") days=\(selectedDays.count) dim=\(dateDimension.rawValue) search=\(trimmedSearch.isEmpty ? "none" : "non-empty") isLoading=\(isLoading)"
     )
   }
 
@@ -1541,7 +1674,8 @@ final class SessionListViewModel: ObservableObject {
     return FilterComputationResult(
       filteredSessions: filtered,
       sections: sections,
-      newCanonicalEntries: newCanonicalEntries
+      newCanonicalEntries: newCanonicalEntries,
+      totalSessions: filtered.count
     )
   }
 
@@ -1611,12 +1745,27 @@ final class SessionListViewModel: ObservableObject {
     let dayIndex: [String: SessionDayIndex]
     let dayCoverage: [SessionMonthCoverageKey: Set<Int>]
     let dayDescriptors: [DaySelectionDescriptor]
+    let reasonDescription: String
+
+    var digest: Int {
+      var hasher = Hasher()
+      hasher.combine(pathFilter?.canonicalPath ?? "")
+      hasher.combine(pathFilter?.prefix ?? "")
+      hasher.combine(projectFilter?.allowedProjects.count ?? 0)
+      hasher.combine(selectedDays.count)
+      hasher.combine(singleDay?.timeIntervalSince1970 ?? 0)
+      hasher.combine(dateDimension.rawValue)
+      hasher.combine(quickSearchNeedle ?? "")
+      hasher.combine(sortOrder.rawValue)
+      return hasher.finalize()
+    }
   }
 
   private struct FilterComputationResult: Sendable {
     let filteredSessions: [SessionSummary]
     let sections: [SessionDaySection]
     let newCanonicalEntries: [String: String]
+    let totalSessions: Int
   }
 
   nonisolated private static func groupSessions(
@@ -1921,6 +2070,14 @@ final class SessionListViewModel: ObservableObject {
     }
   }
 
+  private func logApplyFiltersStart(reason: String) {
+    diagLogger.log("applyFilters start reason=\(reason, privacy: .public) ts=\(self.ts(), format: .fixed(precision: 3))")
+  }
+
+  private func logApplyFiltersEnd(reason: String, elapsed: TimeInterval, sections: Int, sessions: Int) {
+    diagLogger.log("applyFilters done reason=\(reason, privacy: .public) in \(elapsed, format: .fixed(precision: 3))s sections=\(sections, privacy: .public) sessions=\(sessions, privacy: .public) ts=\(self.ts(), format: .fixed(precision: 3))")
+  }
+
   private func configureDirectoryMonitor() {
     directoryMonitor?.cancel()
     directoryRefreshTask?.cancel()
@@ -1969,7 +2126,7 @@ final class SessionListViewModel: ObservableObject {
         await self.refreshIncremental(using: hint)
       } else {
         self.enrichmentSnapshots.removeAll()
-        await self.refreshSessions(force: true)
+        await self.scheduleRefreshDebounced(force: true)
       }
     }
   }
@@ -2010,6 +2167,17 @@ final class SessionListViewModel: ObservableObject {
       guard let self, !Task.isCancelled else { return }
       await self.refreshSessions(force: force)
       self.scheduledFilterRefresh = nil
+    }
+  }
+
+  /// Debounced wrapper around refreshSessions to reduce repeated full enumerations.
+  private func scheduleRefreshDebounced(force: Bool) async {
+    refreshDebounceTask?.cancel()
+    refreshDebounceTask = Task { [weak self] in
+      let delay: UInt64 = force ? 10_000_000 : 300_000_000
+      try? await Task.sleep(nanoseconds: delay)
+      guard let self, !Task.isCancelled else { return }
+      await self.refreshSessions(force: force)
     }
   }
 
@@ -2236,33 +2404,46 @@ extension SessionListViewModel {
   }
 
   func refreshGlobalCount() async {
-    // Prefer content-aware counting for local sources to avoid regressions:
-    // - Codex: fast summary build across all files (dedup by session id)
-    // - Claude: provider returns deduped summaries
-    // - Remote: keep lightweight enumerator-based counts for performance
-    async let codexSummariesResult: [SessionSummary]? = {
-      do {
-        return try await indexer.refreshSessions(
-          root: preferences.sessionsRoot, scope: .all)
-      } catch {
-        return nil
-      }
-    }()
-    async let claudeSummaries: [SessionSummary] = claudeProvider.sessions(scope: .all)
-    async let geminiSummaries: [SessionSummary] = geminiProvider.sessions(scope: .all)
+    // Fast path: use cached coverage/meta to avoid re-parsing sessions on cold start.
+    if let coverage = await indexer.currentCoverage() {
+      await MainActor.run { self.globalSessionCount = coverage.sessionCount }
+      diagLogger.log("refreshGlobalCount via coverage count=\(coverage.sessionCount, privacy: .public) ts=\(self.ts(), format: .fixed(precision: 3))")
+      return
+    }
+    if let meta = await indexer.currentMeta() {
+      await MainActor.run { self.globalSessionCount = meta.sessionCount }
+      diagLogger.log("refreshGlobalCount via meta count=\(meta.sessionCount, privacy: .public) ts=\(self.ts(), format: .fixed(precision: 3))")
+      return
+    }
+
+    // Fallback: enumerate cached summaries (or re-index) when no coverage/meta is available.
+    diagLogger.log("refreshGlobalCount fallback enumerate summaries")
+    let codexSummaries: [SessionSummary]
+    if let cached = await indexer.cachedAllSummaries() {
+      codexSummaries = cached
+    } else {
+      codexSummaries = (try? await indexer.refreshSessions(
+        root: preferences.sessionsRoot, scope: .all)) ?? []
+    }
+
+    let claudeSummaries = await claudeProvider.sessions(scope: .all)
+    let geminiSummaries = await geminiProvider.sessions(scope: .all)
 
     var idSet = Set<String>()
-    if let codexSummaries = await codexSummariesResult {
-      for s in codexSummaries { idSet.insert(s.id) }
-    }
-    for s in await claudeSummaries { idSet.insert(s.id) }
-    for s in await geminiSummaries { idSet.insert(s.id) }
+    for s in codexSummaries { idSet.insert(s.id) }
+    for s in claudeSummaries { idSet.insert(s.id) }
+    for s in geminiSummaries { idSet.insert(s.id) }
 
     var total = idSet.count
     let enabledHosts = preferences.enabledRemoteHosts
     if !enabledHosts.isEmpty {
-      total += await remoteProvider.countSessions(kind: .codex, enabledHosts: enabledHosts)
-      total += await remoteProvider.countSessions(kind: .claude, enabledHosts: enabledHosts)
+      let startRemote = Date()
+      let codexCount = await remoteProvider.countSessions(kind: .codex, enabledHosts: enabledHosts)
+      let claudeCount = await remoteProvider.countSessions(kind: .claude, enabledHosts: enabledHosts)
+      total += codexCount
+      total += claudeCount
+      let elapsed = Date().timeIntervalSince(startRemote)
+      diagLogger.log("refreshGlobalCount remote counts codex=\(codexCount, privacy: .public) claude=\(claudeCount, privacy: .public) in \(elapsed, format: .fixed(precision: 3))s ts=\(self.ts(), format: .fixed(precision: 3))")
     }
     await MainActor.run { self.globalSessionCount = total }
   }

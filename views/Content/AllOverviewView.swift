@@ -30,14 +30,16 @@ struct AllOverviewView: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 20) {
           headerSection
-          
-          if !snapshot.activityChartData.points.isEmpty {
-             OverviewActivityChart(data: snapshot.activityChartData)
+          if viewModel.isLoading && snapshot.totalSessions == 0 {
+            OverviewLoadingPlaceholder()
+          } else {
+            if !snapshot.activityChartData.points.isEmpty {
+               OverviewActivityChart(data: snapshot.activityChartData)
+            }
+            heroSection(columns: cols)
+            efficiencySection(columns: cols)
+            recentSection
           }
-
-          heroSection(columns: cols)
-          efficiencySection(columns: cols)
-          recentSection
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 24)
@@ -55,7 +57,26 @@ struct AllOverviewView: View {
       Text("Updated \(snapshot.lastUpdated.formatted(date: .abbreviated, time: .shortened))")
         .font(.caption)
         .foregroundStyle(.secondary)
+      if let coverageText = coverageLine {
+        Text(coverageText)
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
     }
+  }
+
+  private var coverageLine: String? {
+    guard let coverage = viewModel.cacheCoverage else { return nil }
+    let sources = coverage.sources.isEmpty
+      ? "Cache building…"
+      : coverage.sources.map { $0.displayName }.joined(separator: ", ")
+    let datePart: String
+    if let dt = coverage.lastFullIndexAt {
+      datePart = "indexed \(dt.formatted(date: .abbreviated, time: .shortened))"
+    } else {
+      datePart = "indexed n/a"
+    }
+    return "Cache: \(coverage.sessionCount) entries • \(sources) • \(datePart)"
   }
 
   private func heroSection(columns: [GridItem]) -> some View {
@@ -158,4 +179,37 @@ struct AllOverviewView: View {
     formatter.zeroFormattingBehavior = .dropLeading
     return formatter
   }()
+}
+
+private struct OverviewLoadingPlaceholder: View {
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      RoundedRectangle(cornerRadius: 12)
+        .fill(Color.secondary.opacity(0.1))
+        .frame(height: 160)
+        .overlay(
+          VStack(alignment: .leading, spacing: 8) {
+            HStack {
+              RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.2)).frame(width: 80, height: 10)
+              Spacer()
+            }
+            RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.2)).frame(width: 140, height: 10)
+            RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.15)).frame(height: 80)
+          }
+          .padding()
+        )
+      HStack(spacing: 12) {
+        ForEach(0..<4) { _ in
+          RoundedRectangle(cornerRadius: 12)
+            .fill(Color.secondary.opacity(0.08))
+            .frame(height: 110)
+        }
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+      RoundedRectangle(cornerRadius: 12)
+        .fill(Color.secondary.opacity(0.08))
+        .frame(height: 120)
+    }
+    .redacted(reason: .placeholder)
+  }
 }

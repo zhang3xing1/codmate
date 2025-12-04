@@ -11,6 +11,14 @@ actor ClaudeSessionProvider {
     private let root: URL?
     // Best-effort cache: sessionId -> canonical file URL (updated on scans)
     private var canonicalURLById: [String: URL] = [:]
+    // mtime/size summary cache to skip re-parse when unchanged
+    private var summaryCache: [String: CacheEntry] = [:]
+
+    private struct CacheEntry {
+        let modificationDate: Date?
+        let fileSize: UInt64?
+        let summary: SessionSummary
+    }
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -40,7 +48,7 @@ actor ClaudeSessionProvider {
         guard let root else { return [] }
         guard let enumerator = fileManager.enumerator(
             at: root,
-            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants])
         else { return [] }
 
@@ -49,11 +57,17 @@ actor ClaudeSessionProvider {
         var bestById: [String: SessionSummary] = [:]
         for case let url as URL in enumerator {
             guard url.pathExtension.lowercased() == "jsonl" else { continue }
-            let fileSize = resolveFileSize(for: url)
-            guard let summary = parser.parseSummary(at: url, fileSize: fileSize)
+            guard let values = try? url.resourceValues(
+                forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]),
+                  values.isRegularFile == true else { continue }
+            let fileSize = resolveFileSize(for: url, resourceValues: values)
+            let mtime = values.contentModificationDate
+            let summary = cachedSummary(for: url, modificationDate: mtime, fileSize: fileSize)
+                ?? parser.parseSummary(at: url, fileSize: fileSize)
                 ?? parser.parse(at: url, fileSize: fileSize)?.summary
-            else { continue }
+            guard let summary else { continue }
             guard matches(scope: scope, summary: summary) else { continue }
+            cache(summary: summary, for: url, modificationDate: mtime, fileSize: fileSize)
 
             if let existing = bestById[summary.id] {
                 let pick = prefer(lhs: existing, rhs: summary)
@@ -76,17 +90,24 @@ actor ClaudeSessionProvider {
         let projectURL = root.appendingPathComponent(folder, isDirectory: true)
         guard let enumerator = fileManager.enumerator(
             at: projectURL,
-            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants])
         else { return [] }
 
         var results: [SessionSummary] = []
         for case let url as URL in enumerator {
             guard url.pathExtension.lowercased() == "jsonl" else { continue }
-            let fileSize = resolveFileSize(for: url)
-            if let summary = parser.parseSummary(at: url, fileSize: fileSize) {
+            guard let values = try? url.resourceValues(
+                forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]),
+                  values.isRegularFile == true else { continue }
+            let fileSize = resolveFileSize(for: url, resourceValues: values)
+            let mtime = values.contentModificationDate
+            if let summary = cachedSummary(for: url, modificationDate: mtime, fileSize: fileSize)
+                ?? parser.parseSummary(at: url, fileSize: fileSize) {
+                cache(summary: summary, for: url, modificationDate: mtime, fileSize: fileSize)
                 results.append(summary)
             } else if let parsed = parser.parse(at: url, fileSize: fileSize) {
+                cache(summary: parsed.summary, for: url, modificationDate: mtime, fileSize: fileSize)
                 results.append(parsed.summary)
             }
         }
@@ -125,14 +146,24 @@ actor ClaudeSessionProvider {
         guard let root else { return [:] }
         guard let enumerator = fileManager.enumerator(
             at: root,
-            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants])
         else { return [:] }
 
         var counts: [String: Int] = [:]
         for case let url as URL in enumerator {
             guard url.pathExtension.lowercased() == "jsonl" else { continue }
-            if let parsed = parser.parse(at: url, fileSize: resolveFileSize(for: url)) {
+            guard let values = try? url.resourceValues(
+                forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]),
+                  values.isRegularFile == true else { continue }
+            let fileSize = resolveFileSize(for: url, resourceValues: values)
+            let mtime = values.contentModificationDate
+            if let summary = cachedSummary(for: url, modificationDate: mtime, fileSize: fileSize) {
+                counts[summary.cwd, default: 0] += 1
+                continue
+            }
+            if let parsed = parser.parse(at: url, fileSize: fileSize) {
+                cache(summary: parsed.summary, for: url, modificationDate: mtime, fileSize: fileSize)
                 counts[parsed.summary.cwd, default: 0] += 1
             }
         }
@@ -219,6 +250,18 @@ actor ClaudeSessionProvider {
         return total
     }
 
+    private func cachedSummary(for url: URL, modificationDate: Date?, fileSize: UInt64?) -> SessionSummary? {
+        guard let entry = summaryCache[url.path] else { return nil }
+        guard entry.modificationDate == modificationDate, entry.fileSize == fileSize else { return nil }
+        canonicalURLById[entry.summary.id] = url
+        return entry.summary
+    }
+
+    private func cache(summary: SessionSummary, for url: URL, modificationDate: Date?, fileSize: UInt64?) {
+        summaryCache[url.path] = CacheEntry(modificationDate: modificationDate, fileSize: fileSize, summary: summary)
+        canonicalURLById[summary.id] = url
+    }
+
     private func resolveFileSize(for url: URL) -> UInt64? {
         if let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
            let size = values.fileSize {
@@ -229,6 +272,11 @@ actor ClaudeSessionProvider {
             return number.uint64Value
         }
         return nil
+    }
+
+    private func resolveFileSize(for url: URL, resourceValues: URLResourceValues) -> UInt64? {
+        if let size = resourceValues.fileSize { return UInt64(size) }
+        return resolveFileSize(for: url)
     }
 
     // MARK: - Canonical resolution and dedupe helpers

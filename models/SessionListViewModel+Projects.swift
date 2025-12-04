@@ -1,7 +1,9 @@
 import Foundation
+import OSLog
 
 @MainActor
 extension SessionListViewModel {
+    private static let projectLogger = Logger(subsystem: "io.umate.codmate", category: "SessionListVM.ProjectCounts")
     static let otherProjectId = "__other__"
     func loadProjects() async {
         var list = await projectsStore.listProjects()
@@ -100,8 +102,16 @@ extension SessionListViewModel {
     }
 
     func projectCountsDisplay() -> [String: (visible: Int, total: Int)] {
-        let directVisible = visibleProjectCountsForDateScope()
+        var directVisible = visibleProjectCountsForDateScope()
         let directTotal = projectCounts
+
+        // Cold-start smoothing: when sessions尚未加载、visible为空但总数已知，先用总数填充，避免出现 “N/0” 闪烁
+        if directVisible.isEmpty, isLoading {
+            for (k, v) in directTotal {
+                directVisible[k] = v
+            }
+            Self.projectLogger.log("projectCountsDisplay smoothing with totals only count=\(directTotal.values.reduce(0, +), privacy: .public)")
+        }
 
         // Build cache key
         let visibleKey = ProjectVisibleKey(
@@ -169,6 +179,21 @@ extension SessionListViewModel {
             return cached.value
         }
 
+        // Cold-start: if sessions尚未加载但缓存覆盖度可用，直接返回缓存总数，避免 0 闪烁。
+        if allSessions.isEmpty {
+            if let coverage = cacheCoverage {
+                cachedVisibleCount = (key, coverage.sessionCount)
+                Self.projectLogger.log("visibleAllCount use coverage sessionCount=\(coverage.sessionCount, privacy: .public)")
+                return coverage.sessionCount
+            }
+            if let meta = indexMeta {
+                cachedVisibleCount = (key, meta.sessionCount)
+                Self.projectLogger.log("visibleAllCount use meta sessionCount=\(meta.sessionCount, privacy: .public)")
+                return meta.sessionCount
+            }
+            Self.projectLogger.log("visibleAllCount no cache available, default 0")
+        }
+
         let descriptors = Self.makeDayDescriptors(selectedDays: selectedDays, singleDay: selectedDay)
         let value: Int
         if descriptors.isEmpty {
@@ -177,6 +202,7 @@ extension SessionListViewModel {
             value = allSessions.filter { matchesDayFilters($0, descriptors: descriptors) }.count
         }
         cachedVisibleCount = (key, value)
+        Self.projectLogger.log("visibleAllCount computed from sessions count=\(value, privacy: .public) descriptors=\(descriptors.count, privacy: .public)")
         return value
     }
 

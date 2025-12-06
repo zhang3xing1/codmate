@@ -1,5 +1,15 @@
 import Foundation
 
+struct SessionTokenBreakdown: Codable, Hashable, Sendable {
+    let input: Int
+    let output: Int
+    let cacheRead: Int
+    let cacheCreation: Int
+
+    /// Total tokens = input + output (cache_read is already included in input, just marked for billing discount)
+    var total: Int { input + output }
+}
+
 struct SessionSummary: Identifiable, Hashable, Sendable, Codable {
     let id: String
     let fileURL: URL
@@ -22,6 +32,7 @@ struct SessionSummary: Identifiable, Hashable, Sendable, Codable {
     let responseCounts: [String: Int]
     let turnContextCount: Int
     let totalTokens: Int?
+    var tokenBreakdown: SessionTokenBreakdown? = nil
     let eventCount: Int
     let lineCount: Int
     let lastUpdatedAt: Date?
@@ -198,6 +209,7 @@ extension SessionSummary {
             responseCounts: responseCounts,
             turnContextCount: turnContextCount,
             totalTokens: totalTokens,
+            tokenBreakdown: tokenBreakdown,
             eventCount: eventCount,
             lineCount: lineCount,
             lastUpdatedAt: lastUpdatedAt,
@@ -239,6 +251,44 @@ extension SessionSummary {
             responseCounts: responseCounts,
             turnContextCount: turnContextCount,
             totalTokens: totalTokens,
+            tokenBreakdown: tokenBreakdown,
+            eventCount: eventCount,
+            lineCount: lineCount,
+            lastUpdatedAt: lastUpdatedAt,
+            source: source,
+            remotePath: remotePath,
+            userTitle: userTitle,
+            userComment: userComment,
+            taskId: taskId
+        )
+        s.parseLevel = parseLevel
+        return s
+    }
+
+    func overridingTokens(
+        totalTokens: Int?,
+        tokenBreakdown: SessionTokenBreakdown?
+    ) -> SessionSummary {
+        var s = SessionSummary(
+            id: id,
+            fileURL: fileURL,
+            fileSizeBytes: fileSizeBytes,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            activeDuration: activeDuration,
+            cliVersion: cliVersion,
+            cwd: cwd,
+            originator: originator,
+            instructions: instructions,
+            model: model,
+            approvalPolicy: approvalPolicy,
+            userMessageCount: userMessageCount,
+            assistantMessageCount: assistantMessageCount,
+            toolInvocationCount: toolInvocationCount,
+            responseCounts: responseCounts,
+            turnContextCount: turnContextCount,
+            totalTokens: totalTokens,
+            tokenBreakdown: tokenBreakdown ?? self.tokenBreakdown,
             eventCount: eventCount,
             lineCount: lineCount,
             lastUpdatedAt: lastUpdatedAt,
@@ -257,10 +307,17 @@ extension SessionSummary {
         s.parseLevel = level
         return s
     }
-    
+
     func withParseLevel(fromString levelString: String?) -> SessionSummary {
         guard let levelString, let level = ParseLevel(rawValue: levelString) else { return self }
         return withParseLevel(level)
+    }
+
+    func withTokenBreakdownFallback(_ breakdown: SessionTokenBreakdown?) -> SessionSummary {
+        guard tokenBreakdown == nil, let breakdown else { return self }
+        var s = self
+        s.tokenBreakdown = breakdown
+        return s
     }
 }
 

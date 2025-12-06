@@ -61,7 +61,8 @@ actor ClaudeSessionProvider {
         // Gather all parsed summaries then dedupe by sessionId,
         // preferring canonical filenames and newer/longer files.
         var bestById: [String: SessionSummary] = [:]
-        for case let url as URL in enumerator {
+        let urls = enumerator.compactMap { $0 as? URL }
+        for url in urls {
             guard url.pathExtension.lowercased() == "jsonl" else { continue }
             let values = try url.resourceValues(
                 forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey])
@@ -111,7 +112,8 @@ actor ClaudeSessionProvider {
         else { return [] }
 
         var results: [SessionSummary] = []
-        for case let url as URL in enumerator {
+        let urls = enumerator.compactMap { $0 as? URL }
+        for url in urls {
             guard url.pathExtension.lowercased() == "jsonl" else { continue }
             let values = try url.resourceValues(
                 forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey])
@@ -175,8 +177,9 @@ actor ClaudeSessionProvider {
         else { return [:] }
 
         var counts: [String: Int] = [:]
+        let urls = enumerator.compactMap { $0 as? URL }
         do {
-            for case let url as URL in enumerator {
+            for url in urls {
                 guard url.pathExtension.lowercased() == "jsonl" else { continue }
                 let values = try url.resourceValues(
                     forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey])
@@ -226,6 +229,7 @@ actor ClaudeSessionProvider {
             responseCounts: parsed.summary.responseCounts,
             turnContextCount: parsed.summary.turnContextCount,
             totalTokens: parsed.summary.totalTokens,
+            tokenBreakdown: parsed.summary.tokenBreakdown,
             eventCount: parsed.summary.eventCount,
             lineCount: parsed.summary.lineCount,
             lastUpdatedAt: parsed.summary.lastUpdatedAt,
@@ -308,7 +312,7 @@ actor ClaudeSessionProvider {
                 project: nil,
                 fileModificationTime: modificationDate,
                 fileSize: fileSize,
-                tokenBreakdown: nil,
+                tokenBreakdown: summary.tokenBreakdown,
                 parseError: nil
             )
         }

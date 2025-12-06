@@ -305,7 +305,7 @@ actor SessionIndexer {
                   project: nil,
                   fileModificationTime: modificationDate,
                   fileSize: fileSize.flatMap { UInt64($0) },
-                  tokenBreakdown: nil,
+                  tokenBreakdown: result.tokenBreakdown,
                   parseError: nil,
                   parseLevel: result.parseLevel?.rawValue ?? "metadata")
               } catch {
@@ -432,7 +432,7 @@ actor SessionIndexer {
           project: nil,
           fileModificationTime: nil,
           fileSize: summary.fileSizeBytes,
-          tokenBreakdown: nil,
+          tokenBreakdown: summary.tokenBreakdown,
           parseError: nil
         )
       } catch {
@@ -712,8 +712,8 @@ actor SessionIndexer {
 
   /// Fast index: record the last update timestamp per file to avoid repeated scans
   private var updatedDateIndex: [String: Date] = [:]
-  /// Tail token scan for codex/gemini when tokens are zero (avoids full reparse)
-  private func readTailTotalTokens(url: URL) -> Int? {
+  /// Tail token scan when tokens are zero (avoids full reparse)
+  private func readTailTokenSnapshot(url: URL) -> SessionTokenSnapshot? {
     let chunkSize = 128 * 1024
     guard
       let handle = try? FileHandle(forReadingFrom: url)
@@ -732,15 +732,18 @@ actor SessionIndexer {
         guard !slice.isEmpty else { continue }
         if let row = try? decoder.decode(SessionRow.self, from: Data(slice)) {
           if case let .eventMessage(payload) = row.kind, payload.type == "token_count" {
-            if let msg = payload.message, let range = msg.range(of: "total: ") {
-              let numStr = msg[range.upperBound...].prefix(while: { $0.isNumber })
-              if let val = Int(numStr) { return val }
+            var snapshot = SessionTokenSnapshot()
+            var handled = false
+            if let infoSnapshot = SessionTokenSnapshot.from(info: payload.info) {
+              snapshot.merge(infoSnapshot)
+              handled = true
             }
-            if let info = payload.info,
-               case .object(let dict) = info,
-               case .number(let total) = dict["total"]
-            {
-              return Int(total)
+            if let messageSnapshot = SessionTokenSnapshot.from(message: payload.message ?? payload.text) {
+              snapshot.merge(messageSnapshot)
+              handled = true
+            }
+            if handled {
+              return snapshot
             }
           }
         }
@@ -968,9 +971,17 @@ actor SessionIndexer {
     {
       builder.seedTotalTokens(fallbackTokens)
     }
-    // Tail token_count scan for Codex/Gemini to avoid full reparse when tokens are 0.
-    if builder.totalTokens == 0, let tail = readTailTotalTokens(url: url) {
-      builder.seedTotalTokens(tail)
+    // Tail token_count scan: always read the last token_count from the file tail
+    // because it contains the cumulative total (not just the first 64 lines)
+    if shouldUseTokenFallback(for: url), let tailSnapshot = readTailTokenSnapshot(url: url) {
+      if let total = tailSnapshot.total {
+        builder.seedTotalTokens(total)
+      }
+      builder.seedTokenSnapshot(
+        input: tailSnapshot.input,
+        output: tailSnapshot.output,
+        cacheRead: tailSnapshot.cacheRead,
+        cacheCreation: tailSnapshot.cacheCreation)
     }
 
     builder.parseLevel = .metadata
@@ -979,8 +990,8 @@ actor SessionIndexer {
   }
 
   private func shouldUseTokenFallback(for url: URL) -> Bool {
-    // Claude Code logs do not emit token_count events; skip the fallback to avoid extra scans.
-    return !url.path.contains("/.claude/")
+    // Apply to all sources; if no token_count exists the scan is cheap and falls through.
+    return true
   }
 
   private func buildSummaryFull(for url: URL, builder: inout SessionSummaryBuilder) throws
@@ -1036,6 +1047,7 @@ actor SessionIndexer {
       responseCounts: base.responseCounts,
       turnContextCount: base.turnContextCount,
       totalTokens: base.totalTokens,
+      tokenBreakdown: base.tokenBreakdown,
       eventCount: base.eventCount,
       lineCount: base.lineCount,
       lastUpdatedAt: base.lastUpdatedAt,
@@ -1054,7 +1066,7 @@ actor SessionIndexer {
         project: nil,
         fileModificationTime: values.contentModificationDate,
         fileSize: values.fileSize.flatMap { UInt64($0) },
-        tokenBreakdown: nil,
+        tokenBreakdown: enriched.tokenBreakdown,
         parseError: nil,
         parseLevel: "enriched")  // Full parse + activeDuration computation
     } catch {
@@ -1340,7 +1352,7 @@ extension SessionIndexer: SessionProvider {
             project: nil,
             fileModificationTime: mtime,
             fileSize: fileSize,
-            tokenBreakdown: nil,
+            tokenBreakdown: summary.tokenBreakdown,
             parseError: nil
           )
         } catch {

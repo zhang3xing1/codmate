@@ -86,7 +86,7 @@ actor GeminiSessionProvider {
         project: nil,
         fileModificationTime: modificationDate,
         fileSize: fileSize,
-        tokenBreakdown: nil,
+        tokenBreakdown: summary.tokenBreakdown,
         parseError: nil
       )
     }
@@ -260,6 +260,7 @@ actor GeminiSessionProvider {
       responseCounts: summary.responseCounts,
       turnContextCount: summary.turnContextCount,
       totalTokens: summary.totalTokens,
+      tokenBreakdown: summary.tokenBreakdown,
       eventCount: summary.eventCount,
       lineCount: summary.lineCount,
       lastUpdatedAt: summary.lastUpdatedAt,
@@ -469,6 +470,45 @@ actor GeminiSessionProvider {
     summary = summary
       .overridingSource(.geminiLocal)
       .overridingCounts(userMessages: conversationCount, assistantMessages: assistantMessages)
+
+    // Aggregate token usage across all Gemini segments using the raw chat JSON.
+    var totalInput = 0
+    var totalOutput = 0
+    var totalCached = 0
+    var totalThoughts = 0
+    var totalTool = 0
+
+    for segment in segments {
+      guard let tokens = segment.tokens else { continue }
+      if tokens.input > 0 { totalInput &+= tokens.input }
+      if tokens.output > 0 { totalOutput &+= tokens.output }
+      if tokens.cached > 0 { totalCached &+= tokens.cached }
+      if tokens.thoughts > 0 { totalThoughts &+= tokens.thoughts }
+      if tokens.tool > 0 { totalTool &+= tokens.tool }
+    }
+
+    if totalInput != 0 || totalOutput != 0 || totalCached != 0 || totalThoughts != 0 || totalTool != 0 {
+      // Treat Gemini output as the sum of output, thoughts, and tool tokens.
+      let aggregatedOutput = totalOutput &+ totalThoughts &+ totalTool
+      let aggregatedInput = totalInput
+      let aggregatedCacheRead = totalCached
+      let aggregatedCacheCreation = 0
+
+      let breakdown = SessionTokenBreakdown(
+        input: max(aggregatedInput, 0),
+        output: max(aggregatedOutput, 0),
+        cacheRead: max(aggregatedCacheRead, 0),
+        cacheCreation: max(aggregatedCacheCreation, 0)
+      )
+
+      // Session-wide total tokens = sum of per-message totals (input + output + thoughts + tool).
+      let totalTokens = breakdown.total
+      summary = summary.overridingTokens(
+        totalTokens: totalTokens,
+        tokenBreakdown: breakdown
+      )
+    }
+
     return AggregatedSession(summary: summary, rows: normalized, primaryFileURL: representative.summary.fileURL)
   }
 

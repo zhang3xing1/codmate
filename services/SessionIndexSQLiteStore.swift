@@ -4,16 +4,6 @@ import SQLite3
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-/// Token 分项，用于长期保留 input/output/cache 细粒度统计。
-struct TokenBreakdown: Sendable, Equatable {
-  let input: Int
-  let output: Int
-  let cacheRead: Int
-  let cacheCreation: Int
-
-  var total: Int { input + output + cacheRead + cacheCreation }
-}
-
 /// 持久化缓存的一条记录，包含 SessionSummary 以及文件元数据。
 struct SessionIndexRecord: Sendable {
   let summary: SessionSummary
@@ -23,7 +13,7 @@ struct SessionIndexRecord: Sendable {
   let project: String?
   let schemaVersion: Int
   let parseError: String?
-  let tokenBreakdown: TokenBreakdown?
+  let tokenBreakdown: SessionTokenBreakdown?
   let parseLevel: String?  // "metadata" | "full" | "enriched"
   let parsedAt: Date?       // When this parse was done
 }
@@ -57,7 +47,7 @@ enum SessionIndexSQLiteStoreError: Error {
       directory = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codmate", isDirectory: true)
     }
     try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-    dbURL = directory.appendingPathComponent("sessionIndex-v2.db")
+    dbURL = directory.appendingPathComponent("sessionIndex-v3.db")
   }
 
   // MARK: - Public API
@@ -146,7 +136,7 @@ enum SessionIndexSQLiteStoreError: Error {
       guard let payload = columnData(stmt, index: 0) else {
         throw SessionIndexSQLiteStoreError.decodeFailed("Missing payload for session_id=\(sessionId)")
       }
-      let summary = try JSONDecoder().decode(SessionSummary.self, from: payload)
+      var summary = try JSONDecoder().decode(SessionSummary.self, from: payload)
       let filePath = columnText(stmt, index: 1) ?? summary.fileURL.path
       let fileMtime = columnDate(stmt, index: 2)
       let fileSize = columnInt64(stmt, index: 3).flatMap { UInt64($0) }
@@ -154,6 +144,7 @@ enum SessionIndexSQLiteStoreError: Error {
       let schemaVersion = Int(sqlite3_column_int(stmt, 5))
       let parseError = columnText(stmt, index: 6)
       let tokenBreakdown = tokenBreakdownFromColumns(stmt, startIndex: 7)
+      summary = summary.withTokenBreakdownFallback(tokenBreakdown)
       let parseLevel = columnText(stmt, index: 11)
       let parsedAt = columnDate(stmt, index: 12)
       return SessionIndexRecord(
@@ -186,7 +177,7 @@ enum SessionIndexSQLiteStoreError: Error {
     let decoder = JSONDecoder()
     while sqlite3_step(stmt) == SQLITE_ROW {
       guard let payload = columnData(stmt, index: 0) else { continue }
-      guard let summary = try? decoder.decode(SessionSummary.self, from: payload) else { continue }
+      guard var summary = try? decoder.decode(SessionSummary.self, from: payload) else { continue }
       let filePath = columnText(stmt, index: 1) ?? summary.fileURL.path
       let fileMtime = columnDate(stmt, index: 2)
       let fileSize = columnInt64(stmt, index: 3).flatMap { UInt64($0) }
@@ -194,6 +185,7 @@ enum SessionIndexSQLiteStoreError: Error {
       let schemaVersion = Int(sqlite3_column_int(stmt, 5))
       let parseError = columnText(stmt, index: 6)
       let tokenBreakdown = tokenBreakdownFromColumns(stmt, startIndex: 7)
+      summary = summary.withTokenBreakdownFallback(tokenBreakdown)
       let parseLevel = columnText(stmt, index: 11)
       let parsedAt = columnDate(stmt, index: 12)
       result.append(
@@ -257,7 +249,7 @@ enum SessionIndexSQLiteStoreError: Error {
     project: String?,
     fileModificationTime: Date?,
     fileSize: UInt64?,
-    tokenBreakdown: TokenBreakdown?,
+    tokenBreakdown: SessionTokenBreakdown?,
     parseError: String? = nil,
     parseLevel: String = "full"  // "metadata" | "full" | "enriched"
   ) throws {
@@ -454,7 +446,7 @@ enum SessionIndexSQLiteStoreError: Error {
           project: nil,
           fileModificationTime: nil,
           fileSize: summary.fileSizeBytes,
-          tokenBreakdown: nil,
+          tokenBreakdown: summary.tokenBreakdown,
           parseError: nil
         )
       }
@@ -495,7 +487,7 @@ enum SessionIndexSQLiteStoreError: Error {
     }
     missingDbLogged = false
     try applyPragmas()
-    try migrateIfNeeded()
+    try createSchema()
   }
 
   private func closeDatabase() {
@@ -559,7 +551,7 @@ enum SessionIndexSQLiteStoreError: Error {
     return (clause, binder)
   }
 
-  private func migrateIfNeeded() throws {
+  private func createSchema() throws {
     let createSQL = """
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
@@ -605,7 +597,9 @@ enum SessionIndexSQLiteStoreError: Error {
       task_id TEXT,
       has_terminal INTEGER,
       has_review INTEGER,
-      payload BLOB NOT NULL
+      payload BLOB NOT NULL,
+      parse_level TEXT DEFAULT 'metadata',
+      parsed_at REAL
     );
     """
     try exec(createSQL)
@@ -613,50 +607,7 @@ enum SessionIndexSQLiteStoreError: Error {
     try exec("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(last_updated_at);")
     try exec("CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);")
     try exec("CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);")
-
-    // Composite indexes for project + date queries (Tasks mode optimization)
-    // TEMPORARILY DISABLED FOR PERFORMANCE TESTING
-    // try exec("CREATE INDEX IF NOT EXISTS idx_sessions_project_updated ON sessions(project, last_updated_at DESC);")
-    // try exec("CREATE INDEX IF NOT EXISTS idx_sessions_project_started ON sessions(project, started_at DESC);")
-
-    // Add parse_level and parsed_at columns if they don't exist (schema migration)
-    try? exec("ALTER TABLE sessions ADD COLUMN parse_level TEXT DEFAULT 'metadata';")
-    try? exec("ALTER TABLE sessions ADD COLUMN parsed_at REAL;")
-    try? exec("CREATE INDEX IF NOT EXISTS idx_sessions_parse_level ON sessions(parse_level);")
-
-    // Data migration: Fix incorrectly marked parse_level='full' records
-    // Before this fix, refreshSessions used buildSummaryFast but marked records as 'full'
-    // Heuristic: if lineCount < 100 and parse_level='full', it's likely from fast parse → downgrade to 'metadata'
-    try? exec("UPDATE sessions SET parse_level = 'metadata' WHERE parse_level = 'full' AND line_count < 100;")
-    // Also reset all existing 'full' records to 'metadata' to force re-parsing with correct labels
-    // This is a one-time migration to clean up the database after the bug fix
-    try? exec("UPDATE sessions SET parse_level = 'metadata' WHERE parse_level = 'full' AND parsed_at IS NULL;")
-
-    // Timeline previews table for fast initial rendering
-    // TEMPORARILY DISABLED FOR PERFORMANCE TESTING
-    /*
-    let createPreviewsSQL = """
-    CREATE TABLE IF NOT EXISTS timeline_previews (
-      session_id TEXT NOT NULL,
-      turn_id TEXT NOT NULL,
-      turn_index INTEGER NOT NULL,
-      timestamp REAL NOT NULL,
-      user_preview TEXT,
-      outputs_preview TEXT,
-      output_count INTEGER NOT NULL DEFAULT 0,
-      has_tool_calls INTEGER NOT NULL DEFAULT 0,
-      has_thinking INTEGER NOT NULL DEFAULT 0,
-      file_mtime REAL NOT NULL,
-      file_size INTEGER,
-      created_at REAL NOT NULL DEFAULT (strftime('%s', 'now')),
-      PRIMARY KEY (session_id, turn_id),
-      FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
-    );
-    """
-    try exec(createPreviewsSQL)
-    try exec("CREATE INDEX IF NOT EXISTS idx_timeline_previews_session ON timeline_previews(session_id, turn_index);")
-    try exec("CREATE INDEX IF NOT EXISTS idx_timeline_previews_mtime ON timeline_previews(file_mtime);")
-    */
+    try exec("CREATE INDEX IF NOT EXISTS idx_sessions_parse_level ON sessions(parse_level);")
   }
 
   @discardableResult
@@ -755,13 +706,19 @@ enum SessionIndexSQLiteStoreError: Error {
     return value
   }
 
-  private func tokenBreakdownFromColumns(_ stmt: OpaquePointer?, startIndex: Int32) -> TokenBreakdown? {
+  private func tokenBreakdownFromColumns(_ stmt: OpaquePointer?, startIndex: Int32) -> SessionTokenBreakdown? {
     let input = columnInt64(stmt, index: startIndex).map(Int.init)
     let output = columnInt64(stmt, index: startIndex + 1).map(Int.init)
     let cacheRead = columnInt64(stmt, index: startIndex + 2).map(Int.init)
     let cacheCreation = columnInt64(stmt, index: startIndex + 3).map(Int.init)
-    guard let input, let output, let cacheRead, let cacheCreation else { return nil }
-    return TokenBreakdown(input: input, output: output, cacheRead: cacheRead, cacheCreation: cacheCreation)
+    if input == nil && output == nil && cacheRead == nil && cacheCreation == nil {
+      return nil
+    }
+    return SessionTokenBreakdown(
+      input: input ?? 0,
+      output: output ?? 0,
+      cacheRead: cacheRead ?? 0,
+      cacheCreation: cacheCreation ?? 0)
   }
 
   // MARK: - Source encoding helpers
@@ -1110,7 +1067,7 @@ extension SessionIndexSQLiteStore {
     let decoder = JSONDecoder()
     while sqlite3_step(stmt) == SQLITE_ROW {
       guard let payload = columnData(stmt, index: 0) else { continue }
-      guard let summary = try? decoder.decode(SessionSummary.self, from: payload) else { continue }
+      guard var summary = try? decoder.decode(SessionSummary.self, from: payload) else { continue }
       let filePath = columnText(stmt, index: 1) ?? summary.fileURL.path
       let fileMtime = columnDate(stmt, index: 2)
       let fileSize = columnInt64(stmt, index: 3).flatMap { UInt64($0) }
@@ -1118,6 +1075,7 @@ extension SessionIndexSQLiteStore {
       let schemaVersion = Int(sqlite3_column_int(stmt, 5))
       let parseError = columnText(stmt, index: 6)
       let tokenBreakdown = tokenBreakdownFromColumns(stmt, startIndex: 7)
+      summary = summary.withTokenBreakdownFallback(tokenBreakdown)
       let parseLevel = columnText(stmt, index: 11)
       let parsedAt = columnDate(stmt, index: 12)
       records.append(
@@ -1208,7 +1166,7 @@ extension SessionIndexSQLiteStore {
     let decoder = JSONDecoder()
     while sqlite3_step(stmt) == SQLITE_ROW {
       guard let payload = columnData(stmt, index: 0) else { continue }
-      guard let summary = try? decoder.decode(SessionSummary.self, from: payload) else { continue }
+      guard var summary = try? decoder.decode(SessionSummary.self, from: payload) else { continue }
       let filePath = columnText(stmt, index: 1) ?? summary.fileURL.path
       let fileMtime = columnDate(stmt, index: 2)
       let fileSize = columnInt64(stmt, index: 3).flatMap { UInt64($0) }
@@ -1216,6 +1174,7 @@ extension SessionIndexSQLiteStore {
       let schemaVersion = Int(sqlite3_column_int(stmt, 5))
       let parseError = columnText(stmt, index: 6)
       let tokenBreakdown = tokenBreakdownFromColumns(stmt, startIndex: 7)
+      summary = summary.withTokenBreakdownFallback(tokenBreakdown)
       let parseLevel = columnText(stmt, index: 11)
       let parsedAt = columnDate(stmt, index: 12)
       records.append(

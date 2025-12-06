@@ -149,6 +149,7 @@ struct ClaudeSessionParser {
                 contextRow: contextRow,
                 additionalRows: rows,
                 totalTokens: accumulator.totalTokens,
+                tokenBreakdown: accumulator.tokenBreakdown(),
                 lastTimestamp: accumulator.lastTimestamp,
                 activeDuration: activeAccumulator.total > 0 ? activeAccumulator.total : nil) else {
             return nil
@@ -313,6 +314,7 @@ struct ClaudeSessionParser {
         contextRow: SessionRow?,
         additionalRows: [SessionRow],
         totalTokens: Int,
+        tokenBreakdown: SessionTokenBreakdown?,
         lastTimestamp: Date?,
         activeDuration: TimeInterval?
     ) -> SessionSummary? {
@@ -320,6 +322,14 @@ struct ClaudeSessionParser {
         builder.setSource(.claudeLocal)
         builder.setFileSize(fileSize)
         builder.seedTotalTokens(totalTokens)
+        if let breakdown = tokenBreakdown {
+            builder.seedTokenSnapshot(
+                input: breakdown.input,
+                output: breakdown.output,
+                cacheRead: breakdown.cacheRead,
+                cacheCreation: breakdown.cacheCreation
+            )
+        }
 
         builder.observe(metaRow)
         if let contextRow { builder.observe(contextRow) }
@@ -347,6 +357,7 @@ struct ClaudeSessionParser {
                 responseCounts: summary.responseCounts,
                 turnContextCount: summary.turnContextCount,
                 totalTokens: summary.totalTokens,
+                tokenBreakdown: summary.tokenBreakdown,
                 eventCount: summary.eventCount,
                 lineCount: summary.lineCount,
                 lastUpdatedAt: summary.lastUpdatedAt,
@@ -430,6 +441,10 @@ struct ClaudeSessionParser {
         var firstTimestamp: Date?
         var lastTimestamp: Date?
         var totalTokens: Int = 0
+        var tokenInput: Int = 0
+        var tokenOutput: Int = 0
+        var tokenCacheRead: Int = 0
+        var tokenCacheCreation: Int = 0
 
         mutating func consume(
             _ line: ClaudeLogLine,
@@ -452,7 +467,16 @@ struct ClaudeSessionParser {
             if self.model == nil, let model, !model.isEmpty {
                 self.model = model
             }
-            if let usageTokens, usageTokens > 0 {
+            if let usage = line.message?.usage {
+                totalTokens &+= usage.totalTokens
+                tokenInput &+= usage.inputTokens ?? 0
+                tokenOutput &+= usage.outputTokens ?? 0
+                tokenCacheRead &+= usage.cacheReadInputTokens ?? 0
+                let creation = (usage.cacheCreationInputTokens ?? 0) +
+                    (usage.cacheCreation?.ephemeral5m ?? 0) +
+                    (usage.cacheCreation?.ephemeral1h ?? 0)
+                tokenCacheCreation &+= creation
+            } else if let usageTokens, usageTokens > 0 {
                 totalTokens &+= usageTokens
             }
         }
@@ -475,6 +499,22 @@ struct ClaudeSessionParser {
             // Model info is already shown in the session info card at the top.
             // This avoids duplicate "Syncing / Context Updated / model: xxx" entries in the timeline.
             return nil
+        }
+
+        func tokenBreakdown() -> SessionTokenBreakdown? {
+            let input = tokenInput
+            let output = tokenOutput
+            let cacheRead = tokenCacheRead
+            let cacheCreation = tokenCacheCreation
+            if input == 0 && output == 0 && cacheRead == 0 && cacheCreation == 0 {
+                return nil
+            }
+            return SessionTokenBreakdown(
+                input: input,
+                output: output,
+                cacheRead: cacheRead,
+                cacheCreation: cacheCreation
+            )
         }
     }
 
@@ -584,6 +624,10 @@ struct ClaudeSessionParser {
         var toolInvocationCount = 0
         var responseCounts: [String: Int] = [:]
         var totalTokens = 0
+        var tokenInput = 0
+        var tokenOutput = 0
+        var tokenCacheRead = 0
+        var tokenCacheCreation = 0
 
         mutating func consume(_ line: ClaudeLogLine) {
             guard let type = line.type else { return }
@@ -603,6 +647,13 @@ struct ClaudeSessionParser {
                 assistantMessageCount &+= 1
                 if let usage = line.message?.usage {
                     totalTokens &+= usage.totalTokens
+                    tokenInput &+= usage.inputTokens ?? 0
+                    tokenOutput &+= usage.outputTokens ?? 0
+                    tokenCacheRead &+= usage.cacheReadInputTokens ?? 0
+                    let creation = (usage.cacheCreationInputTokens ?? 0) +
+                        (usage.cacheCreation?.ephemeral5m ?? 0) +
+                        (usage.cacheCreation?.ephemeral1h ?? 0)
+                    tokenCacheCreation &+= creation
                 }
                 toolInvocationCount &+= countToolCalls(in: line.message)
             default:
@@ -617,6 +668,14 @@ struct ClaudeSessionParser {
             activeDuration: TimeInterval?
         ) -> SessionSummary? {
             guard let sessionId, let started = firstTimestamp, let cwd else { return nil }
+            let breakdownTotal = tokenInput + tokenOutput + tokenCacheRead + tokenCacheCreation
+            let breakdown = breakdownTotal > 0
+                ? SessionTokenBreakdown(
+                    input: tokenInput,
+                    output: tokenOutput,
+                    cacheRead: tokenCacheRead,
+                    cacheCreation: tokenCacheCreation)
+                : nil
         let summary = SessionSummary(
             id: sessionId,
             fileURL: url,
@@ -636,6 +695,7 @@ struct ClaudeSessionParser {
                 responseCounts: responseCounts,
                 turnContextCount: 0,
                 totalTokens: totalTokens,
+                tokenBreakdown: breakdown,
                 eventCount: userMessageCount + assistantMessageCount,
                 lineCount: lineCount,
                 lastUpdatedAt: lastTimestamp,

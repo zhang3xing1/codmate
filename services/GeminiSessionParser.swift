@@ -1,8 +1,21 @@
 import Foundation
 
+struct GeminiTokenTotals {
+  let input: Int
+  let output: Int
+  let cached: Int
+  let thoughts: Int
+  let tool: Int
+
+  var hasValues: Bool {
+    return input != 0 || output != 0 || cached != 0 || thoughts != 0 || tool != 0
+  }
+}
+
 struct GeminiParsedLog {
   let summary: SessionSummary
   let rows: [SessionRow]
+  let tokens: GeminiTokenTotals?
 }
 
 private let geminiAbsolutePathRegex = try! NSRegularExpression(
@@ -89,6 +102,43 @@ struct GeminiSessionParser {
     let cwd = inferredDirectory
     var rows: [SessionRow] = []
 
+    // Aggregate per-session token usage from Gemini messages.
+    var totalInput = 0
+    var totalOutput = 0
+    var totalCached = 0
+    var totalThoughts = 0
+    var totalTool = 0
+
+    for message in record.messages where message.type.lowercased() == "gemini" {
+      guard let tokens = message.tokens else { continue }
+      if let value = tokens.input, value > 0 {
+        totalInput &+= value
+      }
+      if let value = tokens.output, value > 0 {
+        totalOutput &+= value
+      }
+      if let value = tokens.cached, value > 0 {
+        totalCached &+= value
+      }
+      if let value = tokens.thoughts, value > 0 {
+        totalThoughts &+= value
+      }
+      if let value = tokens.tool, value > 0 {
+        totalTool &+= value
+      }
+    }
+
+    let aggregatedTokens: GeminiTokenTotals? = {
+      let totals = GeminiTokenTotals(
+        input: totalInput,
+        output: totalOutput,
+        cached: totalCached,
+        thoughts: totalThoughts,
+        tool: totalTool
+      )
+      return totals.hasValues ? totals : nil
+    }()
+
     let meta = SessionMetaPayload(
       id: sessionId,
       timestamp: startedAt,
@@ -142,7 +192,7 @@ struct GeminiSessionParser {
 
     guard var summary = builder.build(for: url) else { return nil }
     summary = summary.overridingSource(.geminiLocal)
-    return GeminiParsedLog(summary: summary, rows: rows)
+    return GeminiParsedLog(summary: summary, rows: rows, tokens: aggregatedTokens)
   }
 
   private func firstModel(in messages: [ConversationRecord.Message]) -> String? {

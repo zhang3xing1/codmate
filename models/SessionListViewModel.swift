@@ -131,7 +131,6 @@ final class SessionListViewModel: ObservableObject {
           }
         }
       }
-      scheduleToolMetricsRefresh()
       sessionLookup = Dictionary(uniqueKeysWithValues: allSessions.map { ($0.id, $0) })
     }
   }
@@ -146,8 +145,6 @@ final class SessionListViewModel: ObservableObject {
   private var coverageLoadTasks: [String: Task<Void, Never>] = [:]
   private var pendingCoverageMonths: Set<String> = []
   private var coverageDebounceTasks: [String: Task<Void, Never>] = [:]  // Per-key debounce
-  private var toolMetricsTask: Task<Void, Never>?
-  private var pendingToolMetricsRefresh = false
   private var selectedSessionsRefreshTask: Task<Void, Never>?
   struct SessionDayIndex: Equatable {
     let created: Date
@@ -1434,61 +1431,6 @@ final class SessionListViewModel: ObservableObject {
       if d != 0 { delta[k] = d }
     }
     return delta
-  }
-
-  private func scheduleToolMetricsRefresh() {
-    if toolMetricsTask != nil {
-      pendingToolMetricsRefresh = true
-      return
-    }
-    guard !allSessions.isEmpty else { return }
-    pendingToolMetricsRefresh = false
-
-    // Optimize: only scan visible sessions instead of all sessions
-    // Extract unique sessions from current sections
-    var visibleSessions: [SessionSummary] = []
-    var seenIDs = Set<String>()
-    for section in sections {
-      for summary in section.sessions {
-        if seenIDs.insert(summary.id).inserted {
-          visibleSessions.append(summary)
-        }
-      }
-    }
-
-    // Fallback to all sessions if no visible sessions (e.g., during initial load)
-    let sessions = visibleSessions.isEmpty ? allSessions : visibleSessions
-
-    toolMetricsTask = Task.detached(priority: .utility) { [weak self] in
-      guard let self else { return }
-      let counts = await self.ripgrepStore.toolInvocationCounts(for: sessions)
-      await MainActor.run {
-        self.applyToolInvocationOverrides(counts)
-      }
-      await MainActor.run { [weak self] in
-        guard let self else { return }
-        self.toolMetricsTask = nil
-        if self.pendingToolMetricsRefresh {
-          self.pendingToolMetricsRefresh = false
-          self.scheduleToolMetricsRefresh()
-        }
-      }
-    }
-  }
-
-  @MainActor
-  private func applyToolInvocationOverrides(_ counts: [String: Int]) {
-    guard !counts.isEmpty else { return }
-    var mutated = false
-    for idx in allSessions.indices {
-      let id = allSessions[idx].id
-      if let value = counts[id], allSessions[idx].toolInvocationCount != value {
-        allSessions[idx].toolInvocationCount = value
-        mutated = true
-      }
-    }
-    guard mutated else { return }
-    scheduleApplyFilters()
   }
 
   private func scheduleCalendarCountsRefresh(
@@ -3551,12 +3493,10 @@ extension SessionListViewModel {
     coverageDebounceTasks.removeAll()
     coverageLoadTasks.values.forEach { $0.cancel() }
     coverageLoadTasks.removeAll()
-    toolMetricsTask?.cancel()
     await ripgrepStore.resetAll()
     updatedMonthCoverage.removeAll()
     monthCountsCache.removeAll()
     scheduleViewUpdate()
-    scheduleToolMetricsRefresh()
     if dateDimension == .updated {
       // Use current selected path for accurate cache key
       triggerCoverageLoad(

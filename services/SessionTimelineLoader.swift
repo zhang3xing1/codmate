@@ -771,13 +771,4 @@ private extension JSONValue {
         }
     }
 
-    var intValue: Int? {
-        if case let .number(value) = self {
-            return Int(value)
-        }
-        if case let .string(string) = self {
-            return Int(string)
-        }
-        return nil
-    }
 }

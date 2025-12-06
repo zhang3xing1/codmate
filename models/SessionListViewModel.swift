@@ -106,6 +106,7 @@ final class SessionListViewModel: ObservableObject {
   let actions: SessionActions
   var allSessions: [SessionSummary] = [] {
     didSet {
+      sessionsVersion &+= 1
       invalidateVisibleCountCache()
       invalidateCalendarCaches()
       pruneDayCache()
@@ -135,6 +136,7 @@ final class SessionListViewModel: ObservableObject {
     }
   }
   private var sessionLookup: [String: SessionSummary] = [:]
+  private var sessionsVersion: UInt64 = 0
   private var fulltextMatches: Set<String> = []  // SessionSummary.id set
   private var fulltextTask: Task<Void, Never>?
   private var enrichmentTask: Task<Void, Never>?
@@ -1847,6 +1849,7 @@ final class SessionListViewModel: ObservableObject {
 
     return FilterSnapshot(
       sessions: allSessions,
+      sessionsVersion: sessionsVersion,
       pathFilter: pathFilter,
       projectFilter: projectFilter,
       selectedDays: selectedDays,
@@ -1998,6 +2001,7 @@ final class SessionListViewModel: ObservableObject {
     }
 
     let sessions: [SessionSummary]
+    let sessionsVersion: UInt64
     let pathFilter: PathFilter?
     let projectFilter: ProjectFilter?
     let selectedDays: Set<Date>
@@ -2021,6 +2025,7 @@ final class SessionListViewModel: ObservableObject {
       hasher.combine(dateDimension.rawValue)
       hasher.combine(quickSearchNeedle ?? "")
       hasher.combine(sortOrder.rawValue)
+      hasher.combine(sessionsVersion)
       return hasher.finalize()
     }
   }

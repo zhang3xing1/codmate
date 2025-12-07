@@ -58,6 +58,17 @@ struct ProjectsListView: View {
     .padding(.horizontal, -10)
     .environment(\.defaultMinListRowHeight, 16)
     .environment(\.controlSize, .small)
+    .contextMenu { 
+      Button("New Project…") {
+        newParentProject = nil
+        showNewProject = true
+      }
+      if viewModel.selectedProjectIDs.contains(SessionListViewModel.otherProjectId) {
+        Button("Auto assign to projects") {
+          Task { await autoAssignOthersForCurrentDay() }
+        }
+      }
+    }
     .dropDestination(for: String.self) { items, _ in
       // Handle drop on list background (outside any project row)
       // This removes the parent from the dragged project (moves to top level)
@@ -188,6 +199,7 @@ struct ProjectsListView: View {
       node: node,
       countsDisplay: countsDisplay,
       displayName: displayName(_:),
+      viewModel: viewModel,
       expanded: expandedBinding,
       onTap: { handleSelection(for: $0) },
       onDoubleTap: {
@@ -226,10 +238,86 @@ struct ProjectsListView: View {
         Task {
           await viewModel.changeProjectParent(projectId: projectId, newParentId: newParentId)
         }
+      },
+      onNewProjectClick: {
+        newParentProject = nil
+        showNewProject = true
       }
     )
   }
   
+  private func autoAssignOthersForCurrentDay() async {
+    let descriptors = currentDayDescriptors()
+
+    let projectDirs: [(id: String, path: String)] = viewModel.projects.compactMap { project in
+      guard let raw = project.directory?.trimmingCharacters(in: .whitespacesAndNewlines),
+        !raw.isEmpty else { return nil }
+      let normalized = URL(fileURLWithPath: raw).standardizedFileURL.path
+      let slash = normalized.hasSuffix("/") ? normalized : normalized + "/"
+      return (project.id, slash)
+    }
+    guard !projectDirs.isEmpty else { return }
+
+    let candidates = viewModel.allSessions.filter { session in
+      viewModel.projectIdForSession(session.id) == nil
+        && viewModel.matchesDayFilters(session, descriptors: descriptors)
+    }
+    guard !candidates.isEmpty else {
+      await SystemNotifier.shared.notify(title: "CodMate", body: "No unassigned sessions to match.")
+      return
+    }
+
+    var assignments: [String: [String]] = [:]
+    for session in candidates {
+      let rawPath = session.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+      let cwd = rawPath.isEmpty
+        ? session.fileURL.deletingLastPathComponent().path
+        : rawPath
+      let normalized = URL(fileURLWithPath: cwd).standardizedFileURL.path
+      let sessionPath = normalized.hasSuffix("/") ? normalized : normalized + "/"
+      
+      let matchingProjects = projectDirs.filter { candidate in 
+        sessionPath.hasPrefix(candidate.path) 
+      }
+      
+      if let best = matchingProjects.max(by: { lhs, rhs in 
+        lhs.path.count < rhs.path.count 
+      }) {
+        assignments[best.id, default: []].append(session.id)
+      }
+    }
+
+    guard !assignments.isEmpty else {
+      await SystemNotifier.shared.notify(title: "CodMate", body: "No matching project paths found.")
+      return
+    }
+
+    var total = 0
+    for (pid, ids) in assignments {
+      total += ids.count
+      await viewModel.assignSessions(to: pid, ids: ids)
+    }
+    await SystemNotifier.shared.notify(
+      title: "CodMate",
+      body: "Auto-assigned \(total) session(s) based on working directory.")
+  }
+
+  private func currentDayDescriptors() -> [SessionListViewModel.DaySelectionDescriptor] {
+    var descriptors = SessionListViewModel.makeDayDescriptors(
+      selectedDays: viewModel.selectedDays,
+      singleDay: viewModel.selectedDay
+    )
+    if descriptors.isEmpty {
+      let today = Date()
+      let key = viewModel.monthKey(for: today)
+      let day = Calendar.current.component(.day, from: today)
+      descriptors = [
+        SessionListViewModel.DaySelectionDescriptor(date: today, monthKey: key, day: day)
+      ]
+    }
+    return descriptors
+  }
+
   private func makeOtherProjectRow(countsDisplay: [String: (visible: Int, total: Int)]) -> some View {
     let otherId = SessionListViewModel.otherProjectId
     let otherProject = Project(
@@ -317,6 +405,7 @@ private struct ProjectTreeNodeView: View {
   let node: ProjectTreeNode
   let countsDisplay: [String: (visible: Int, total: Int)]
   let displayName: (Project) -> String
+  let viewModel: SessionListViewModel
   @Binding var expanded: Set<String>
   let onTap: (Project) -> Void
   let onDoubleTap: (Project) -> Void
@@ -329,6 +418,7 @@ private struct ProjectTreeNodeView: View {
   let onOpenInEditor: (Project, EditorApp) -> Void
   let onAssignSessions: (String, [String]) -> Void
   let onChangeParent: (String, String?) -> Void
+  let onNewProjectClick: () -> Void
 
   var body: some View {
     Group {
@@ -339,6 +429,7 @@ private struct ProjectTreeNodeView: View {
               node: child,
               countsDisplay: countsDisplay,
               displayName: displayName,
+              viewModel: viewModel,
               expanded: $expanded,
               onTap: onTap,
               onDoubleTap: onDoubleTap,
@@ -350,7 +441,8 @@ private struct ProjectTreeNodeView: View {
               onReveal: onReveal,
               onOpenInEditor: onOpenInEditor,
               onAssignSessions: onAssignSessions,
-              onChangeParent: onChangeParent
+              onChangeParent: onChangeParent,
+              onNewProjectClick: onNewProjectClick
             )
           }
         } label: {
@@ -432,10 +524,22 @@ private struct ProjectTreeNodeView: View {
 
   @ViewBuilder
   private func contextMenu(for project: Project) -> some View {
-    Button {
-      onNewSession(project)
-    } label: {
-      Label("New Session", systemImage: "plus")
+    if let anchor = projectAnchor(for: project) {
+      let items = buildNewMenuItems(anchor: anchor)
+      Menu {
+        SplitMenuItemsView(items: items)
+      } label: {
+        Label("New Session…", systemImage: "plus")
+      }
+    } else {
+      Button {
+        onNewSession(project)
+      } label: {
+        Label("New Session", systemImage: "plus")
+      }
+    }
+    Button("New Project…") {
+      onNewProjectClick()
     }
     Button {
       onNewTask(project)
@@ -481,6 +585,211 @@ private struct ProjectTreeNodeView: View {
       onDelete(project)
     } label: {
       Label("Delete Project", systemImage: "trash")
+    }
+
+    if project.id == SessionListViewModel.otherProjectId {
+      Divider()
+      Button("Auto assign to projects") {
+        Task { await autoAssignOthersForCurrentDay() }
+      }
+    }
+  }
+
+  // MARK: - Shared New Session menu (matches session/task context menus)
+  private func projectAnchor(for project: Project) -> SessionSummary? {
+    let vm = self.viewModel
+    // Prefer a visible session for this project; fallback to any session in the project.
+    if let visible = vm.sections.flatMap({ $0.sessions }).first(
+      where: { vm.projectIdForSession($0.id) == project.id })
+    {
+      return visible
+    }
+    return vm.allSessions.first { vm.projectIdForSession($0.id) == project.id }
+  }
+
+  private func buildNewMenuItems(anchor: SessionSummary) -> [SplitMenuItem] {
+    let vm = self.viewModel
+    let allowed = Set(vm.allowedSources(for: anchor))
+    let requestedOrder: [ProjectSessionSource] = [.claude, .codex, .gemini]
+    let enabledRemoteHosts = vm.preferences.enabledRemoteHosts.sorted()
+
+    func sourceKey(_ source: SessionSource) -> String {
+      switch source {
+      case .codexLocal: return "codex-local"
+      case .codexRemote(let host): return "codex-\(host)"
+      case .claudeLocal: return "claude-local"
+      case .claudeRemote(let host): return "claude-\(host)"
+      case .geminiLocal: return "gemini-local"
+      case .geminiRemote(let host): return "gemini-\(host)"
+      }
+    }
+
+    func launchItems(for source: SessionSource) -> [SplitMenuItem] {
+      let key = sourceKey(source)
+      return [
+        SplitMenuItem(
+          id: "\(key)-terminal",
+          kind: .action(title: "Terminal", run: {
+            launchNewSession(for: anchor, using: source, style: .terminal)
+          })
+        ),
+        SplitMenuItem(
+          id: "\(key)-iterm2",
+          kind: .action(title: "iTerm2", run: {
+            launchNewSession(for: anchor, using: source, style: .iterm)
+          })
+        ),
+        SplitMenuItem(
+          id: "\(key)-warp",
+          kind: .action(title: "Warp", run: {
+            launchNewSession(for: anchor, using: source, style: .warp)
+          })
+        )
+      ]
+    }
+
+    func remoteSource(for base: ProjectSessionSource, host: String) -> SessionSource {
+      switch base {
+      case .codex: return .codexRemote(host: host)
+      case .claude: return .claudeRemote(host: host)
+      case .gemini: return .geminiRemote(host: host)
+      }
+    }
+
+    var menuItems: [SplitMenuItem] = []
+    for base in requestedOrder where allowed.contains(base) {
+      var providerItems = launchItems(for: base.sessionSource)
+      if !enabledRemoteHosts.isEmpty {
+        providerItems.append(SplitMenuItem(id: "sep-\(base.rawValue)", kind: .separator))
+        for host in enabledRemoteHosts {
+          let remote = remoteSource(for: base, host: host)
+          providerItems.append(
+            SplitMenuItem(
+              id: "remote-\(base.rawValue)-\(host)",
+              kind: .submenu(title: host, items: launchItems(for: remote))
+            ))
+        }
+      }
+      menuItems.append(
+        SplitMenuItem(
+          id: "provider-\(base.rawValue)",
+          kind: .submenu(title: base.displayName, items: providerItems)
+        ))
+    }
+
+    if menuItems.isEmpty {
+      let fallbackSource = anchor.source
+      menuItems.append(
+        SplitMenuItem(
+          id: "fallback-\(sourceKey(fallbackSource))",
+          kind: .submenu(
+            title: fallbackSource.branding.displayName,
+            items: launchItems(for: fallbackSource)
+          )))
+    }
+    return menuItems
+  }
+
+  private func autoAssignOthersForCurrentDay() async {
+    let vm = self.viewModel
+    let descriptors = currentDayDescriptors()
+
+    let projectDirs: [(id: String, path: String)] = vm.projects.compactMap { project in
+      guard let raw = project.directory?.trimmingCharacters(in: .whitespacesAndNewlines),
+        !raw.isEmpty else { return nil }
+      let normalized = URL(fileURLWithPath: raw).standardizedFileURL.path
+      let slash = normalized.hasSuffix("/") ? normalized : normalized + "/"
+      return (project.id, slash)
+    }
+    guard !projectDirs.isEmpty else { return }
+
+    let candidates = vm.allSessions.filter { session in
+      vm.projectIdForSession(session.id) == nil
+        && vm.matchesDayFilters(session, descriptors: descriptors)
+    }
+    guard !candidates.isEmpty else {
+      await SystemNotifier.shared.notify(title: "CodMate", body: "No unassigned sessions to match.")
+      return
+    }
+
+    var assignments: [String: [String]] = [:]
+    for session in candidates {
+      let rawPath = session.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+      let cwd = rawPath.isEmpty
+        ? session.fileURL.deletingLastPathComponent().path
+        : rawPath
+      let normalized = URL(fileURLWithPath: cwd).standardizedFileURL.path
+      let sessionPath = normalized.hasSuffix("/") ? normalized : normalized + "/"
+      
+      let matchingProjects = projectDirs.filter { candidate in 
+        sessionPath.hasPrefix(candidate.path) 
+      }
+      
+      if let best = matchingProjects.max(by: { lhs, rhs in 
+        lhs.path.count < rhs.path.count 
+      }) {
+        assignments[best.id, default: []].append(session.id)
+      }
+    }
+
+    guard !assignments.isEmpty else {
+      await SystemNotifier.shared.notify(title: "CodMate", body: "No matching project paths found.")
+      return
+    }
+
+    var total = 0
+    for (pid, ids) in assignments {
+      total += ids.count
+      await vm.assignSessions(to: pid, ids: ids)
+    }
+    await MainActor.run {
+      vm.scheduleApplyFilters()
+      vm.scheduleViewUpdate()
+    }
+    await SystemNotifier.shared.notify(
+      title: "CodMate",
+      body: "Auto-assigned \(total) session(s) based on working directory.")
+  }
+
+  private func currentDayDescriptors() -> [SessionListViewModel.DaySelectionDescriptor] {
+    let vm = self.viewModel
+    var descriptors = SessionListViewModel.makeDayDescriptors(
+      selectedDays: vm.selectedDays,
+      singleDay: vm.selectedDay
+    )
+    if descriptors.isEmpty {
+      let today = Date()
+      let key = vm.monthKey(for: today)
+      let day = Calendar.current.component(.day, from: today)
+      descriptors = [
+        SessionListViewModel.DaySelectionDescriptor(date: today, monthKey: key, day: day)
+      ]
+    }
+    return descriptors
+  }
+
+  private enum NewLaunchStyle { case terminal, iterm, warp }
+
+  private func launchNewSession(
+    for session: SessionSummary,
+    using source: SessionSource,
+    style: NewLaunchStyle
+  ) {
+    let target = session.overridingSource(source)
+    let vm = self.viewModel
+    vm.recordIntentForDetailNew(anchor: target)
+    switch style {
+    case .terminal:
+      if !vm.openNewSession(session: target) {
+        vm.copyNewSessionCommandsRespectingProject(session: target)
+        _ = vm.openAppleTerminal(at: target.cwd)
+      }
+    case .iterm:
+      let cmd = vm.buildNewSessionCLIInvocationRespectingProject(session: target)
+      vm.openPreferredTerminalViaScheme(app: .iterm2, directory: target.cwd, command: cmd)
+    case .warp:
+      vm.copyNewSessionCommandsRespectingProject(session: target)
+      vm.openPreferredTerminalViaScheme(app: .warp, directory: target.cwd)
     }
   }
 }

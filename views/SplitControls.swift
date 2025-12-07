@@ -40,12 +40,37 @@ struct SplitPrimaryMenuButton: View {
 
 struct SplitMenuItem: Identifiable {
   enum Kind {
-    case action(title: String, disabled: Bool = false, _ run: () -> Void)
+    case action(title: String, disabled: Bool = false, run: () -> Void)
     case separator
     case submenu(title: String, items: [SplitMenuItem])
   }
-  let id = UUID()
+  let id: String
   let kind: Kind
+
+  init(id: String = UUID().uuidString, kind: Kind) {
+    self.id = id
+    self.kind = kind
+  }
+}
+
+struct SplitMenuItemsView: View {
+  let items: [SplitMenuItem]
+
+  var body: some View {
+    ForEach(items) { item in
+      switch item.kind {
+      case .separator:
+        Divider()
+      case .action(let title, let disabled, let run):
+        Button(title, action: run)
+          .disabled(disabled)
+      case .submenu(let title, let children):
+        Menu(title) {
+          SplitMenuItemsView(items: children)
+        }
+      }
+    }
+  }
 }
 
 struct ChevronMenuButton: NSViewRepresentable {

@@ -6,7 +6,7 @@ import SwiftUI
 
 /// TaskListView: Displays tasks and sessions in Tasks mode, maintaining the original session list appearance
 struct TaskListView: View {
-  @ObservedObject var viewModel: SessionListViewModel
+  @EnvironmentObject private var viewModel: SessionListViewModel
   @ObservedObject var workspaceVM: ProjectWorkspaceViewModel
   @Binding var selection: Set<SessionSummary.ID>
 
@@ -19,7 +19,6 @@ struct TaskListView: View {
   var isAwaitingFollowup: ((SessionSummary) -> Bool)? = nil
   var onPrimarySelect: ((SessionSummary) -> Void)? = nil
   var onNewSessionWithTaskContext: ((CodMateTask, SessionSummary) -> Void)? = nil
-
   @State private var showNewTaskSheet = false
   @State private var newTaskTitle = ""
   @State private var newTaskDescription = ""
@@ -76,6 +75,7 @@ struct TaskListView: View {
       }
       .padding(.horizontal, -2)
       .listStyle(.inset)
+      .contextMenu { taskListBackgroundContextMenu() }
     }
     .sheet(isPresented: $showNewTaskSheet) {
       if let projectId = currentProjectId {
@@ -354,7 +354,9 @@ struct TaskListView: View {
     // For each task (in sorted order), add a header row and then its sessions that belong to this section
     for task in sortedTasks {
       result.append(.taskHeader(task))
-      if !collapsedTaskIDs.contains(task.task.id), let sectionSessions = taskSectionSessions[task.task.id] {
+      if !collapsedTaskIDs.contains(task.task.id),
+        let sectionSessions = taskSectionSessions[task.task.id]
+      {
         for session in sectionSessions {
           result.append(.taskSession(task, session))
         }
@@ -417,10 +419,12 @@ struct TaskListView: View {
             Image(systemName: taskWithSessions.task.status.icon)
               .font(.caption)
               .foregroundColor(statusColor(taskWithSessions.task.status))
-            
+
             // Collapse state indicator
             Image(systemName: "chevron.right")
-              .rotationEffect(.degrees(collapsedTaskIDs.contains(taskWithSessions.task.id) ? 0 : 90))
+              .rotationEffect(
+                .degrees(collapsedTaskIDs.contains(taskWithSessions.task.id) ? 0 : 90)
+              )
               .font(.caption2.bold())
               .foregroundStyle(.tertiary)
           }
@@ -559,12 +563,14 @@ struct TaskListView: View {
     }
     .contextMenu {
       Button("Resume") { onResume(session) }
-      Button("Reveal in Finder") { onReveal(session) }
       Button("Export as Markdown") { onExportMarkdown(session) }
       if let project = projectForSession(session, parentTask: parentTask) {
         Divider()
-        Button("New Session") {
-          viewModel.newSession(project: project)
+        let items = buildNewMenuItems(anchor: session)
+        if items.isEmpty {
+          Button("New Session") { viewModel.newSession(project: project) }
+        } else {
+          Menu("New Session…") { SplitMenuItemsView(items: items) }
         }
         Button("New Task…") {
           let draft = CodMateTask(
@@ -576,9 +582,9 @@ struct TaskListView: View {
           editingTask = draft
         }
         if parentTask == nil {
-           Button("Add to Task…") {
-             sessionAssigningTask = session
-           }
+          Button("Add to Task…") {
+            sessionAssigningTask = session
+          }
         }
       }
       if parentTask != nil {
@@ -593,7 +599,9 @@ struct TaskListView: View {
         }
       }
       Divider()
-      Button("Delete", role: .destructive) { onDeleteRequest(session) }
+      Button("Copy Absolute Path") { copyAbsolutePath(session) }
+      Button("Reveal in Finder") { onReveal(session) }
+      Button("Move to Trash", role: .destructive) { onDeleteRequest(session) }
     }
     .onDrag {
       self.draggedSession = session
@@ -730,15 +738,175 @@ struct TaskListView: View {
       return lDate < rDate
     })
   }
+
+  @ViewBuilder
+  private func projectContextMenu(for project: Project) -> some View {
+    let items = buildNewMenuItems(anchor: latestAnchor(for: project))
+    Menu("New Session…") {
+      if items.isEmpty {
+        Button("No recent session to anchor", action: {}).disabled(true)
+      } else {
+        SplitMenuItemsView(items: items)
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func taskListBackgroundContextMenu() -> some View {
+    if let projectId = currentProjectId,
+      let project = viewModel.projects.first(where: { $0.id == projectId })
+    {
+      let items = buildNewMenuItems(anchor: latestAnchor(for: project))
+      Menu("New Session…") {
+        if items.isEmpty {
+          Button("No recent session to anchor", action: {}).disabled(true)
+        } else {
+          SplitMenuItemsView(items: items)
+        }
+      }
+      Button("New Task…") {
+        newTaskTitle = ""
+        newTaskDescription = ""
+        showNewTaskSheet = true
+      }
+    }
+    Divider()
+    Button("Collapse all Tasks") {
+      NotificationCenter.default.post(
+        name: .codMateCollapseAllTasks, object: nil,
+        userInfo: ["projectId": currentProjectId as Any])
+    }
+    Button("Expand all Tasks") {
+      NotificationCenter.default.post(
+        name: .codMateExpandAllTasks, object: nil,
+        userInfo: ["projectId": currentProjectId as Any])
+    }
+  }
+
+  private func copyAbsolutePath(_ session: SessionSummary) {
+    let pb = NSPasteboard.general
+    pb.clearContents()
+    pb.setString(session.fileURL.path, forType: .string)
+  }
+
+  private func buildNewMenuItems(anchor: SessionSummary?) -> [SplitMenuItem] {
+    guard let anchor else { return [] }
+    let allowed = Set(viewModel.allowedSources(for: anchor))
+    let requestedOrder: [ProjectSessionSource] = [.claude, .codex, .gemini]
+    let enabledRemoteHosts = viewModel.preferences.enabledRemoteHosts.sorted()
+
+    func sourceKey(_ source: SessionSource) -> String {
+      switch source {
+      case .codexLocal: return "codex-local"
+      case .codexRemote(let host): return "codex-\(host)"
+      case .claudeLocal: return "claude-local"
+      case .claudeRemote(let host): return "claude-\(host)"
+      case .geminiLocal: return "gemini-local"
+      case .geminiRemote(let host): return "gemini-\(host)"
+      }
+    }
+
+    func launchItems(for source: SessionSource) -> [SplitMenuItem] {
+      let key = sourceKey(source)
+      return [
+        SplitMenuItem(
+          id: "\(key)-terminal",
+          kind: .action(title: "Terminal", run: {
+            onNewSession(with: anchor, using: source, style: .terminal)
+          })
+        ),
+        SplitMenuItem(
+          id: "\(key)-iterm2",
+          kind: .action(title: "iTerm2", run: {
+            onNewSession(with: anchor, using: source, style: .iterm)
+          })
+        ),
+        SplitMenuItem(
+          id: "\(key)-warp",
+          kind: .action(title: "Warp", run: {
+            onNewSession(with: anchor, using: source, style: .warp)
+          })
+        )
+      ]
+    }
+
+    func remoteSource(for base: ProjectSessionSource, host: String) -> SessionSource {
+      switch base {
+      case .codex: return .codexRemote(host: host)
+      case .claude: return .claudeRemote(host: host)
+      case .gemini: return .geminiRemote(host: host)
+      }
+    }
+
+    var menuItems: [SplitMenuItem] = []
+    for base in requestedOrder where allowed.contains(base) {
+      var providerItems = launchItems(for: base.sessionSource)
+      if !enabledRemoteHosts.isEmpty {
+        providerItems.append(.init(kind: .separator))
+        for host in enabledRemoteHosts {
+          let remote = remoteSource(for: base, host: host)
+          providerItems.append(
+            .init(
+              id: "remote-\(base.rawValue)-\(host)",
+              kind: .submenu(title: host, items: launchItems(for: remote))
+            ))
+        }
+      }
+      menuItems.append(
+        .init(
+          id: "provider-\(base.rawValue)",
+          kind: .submenu(title: base.displayName, items: providerItems)
+        ))
+    }
+
+    if menuItems.isEmpty {
+      let fallback = anchor.source
+      menuItems.append(
+        .init(
+          id: "fallback-\(sourceKey(fallback))",
+          kind: .submenu(title: fallback.branding.displayName, items: launchItems(for: fallback))
+        ))
+    }
+    return menuItems
+  }
+
+  private enum NewLaunchStyle { case terminal, iterm, warp }
+
+  private func onNewSession(with anchor: SessionSummary, using source: SessionSource, style: NewLaunchStyle) {
+    let target = anchor.overridingSource(source)
+    viewModel.recordIntentForDetailNew(anchor: target)
+    switch style {
+    case .terminal:
+      if !viewModel.openNewSession(session: target) {
+        viewModel.copyNewSessionCommandsRespectingProject(session: target)
+        _ = viewModel.openAppleTerminal(at: target.cwd)
+      }
+    case .iterm:
+      let cmd = viewModel.buildNewSessionCLIInvocationRespectingProject(session: target)
+      viewModel.openPreferredTerminalViaScheme(app: .iterm2, directory: target.cwd, command: cmd)
+    case .warp:
+      viewModel.copyNewSessionCommandsRespectingProject(session: target)
+      viewModel.openPreferredTerminalViaScheme(app: .warp, directory: target.cwd)
+    }
+  }
+
+  private func latestAnchor(for project: Project) -> SessionSummary? {
+    if let visible = viewModel.sections.flatMap({ $0.sessions }).first(
+      where: { viewModel.projectIdForSession($0.id) == project.id })
+    {
+      return visible
+    }
+    return viewModel.allSessions.first { viewModel.projectIdForSession($0.id) == project.id }
+  }
 }
 
-private extension TaskListView {
-  func shouldHandleTaskNotification(_ note: Notification) -> Bool {
+extension TaskListView {
+  fileprivate func shouldHandleTaskNotification(_ note: Notification) -> Bool {
     guard let target = note.userInfo?["projectId"] as? String else { return true }
     return target == currentProjectId
   }
 
-  func taskIDsForCurrentProject() -> Set<UUID> {
+  fileprivate func taskIDsForCurrentProject() -> Set<UUID> {
     guard let projectId = currentProjectId else { return [] }
     let ids = workspaceVM.tasks.filter { $0.projectId == projectId }.map { $0.id }
     return Set(ids)

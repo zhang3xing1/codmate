@@ -59,58 +59,6 @@ struct ClaudeSessionParser {
         return nil
     }
 
-    /// Streaming summary-only parse to reduce memory for bulk indexing.
-    func parseSummary(at url: URL, fileSize: UInt64? = nil) -> SessionSummary? {
-        let filename = url.deletingPathExtension().lastPathComponent
-        if filename.hasPrefix("agent-") {
-            return nil
-        }
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? handle.close() }
-
-        var buffer = Data()
-        var accumulator = SummaryAccumulator()
-        var activeAccumulator = ActiveDurationAccumulator()
-        var lineCount = 0
-
-        func processLine(_ data: Data) {
-            guard let line = decodeLine(data) else { return }
-            if line.isSidechain == true { return }
-            accumulator.consume(line)
-            activeAccumulator.observe(type: line.type, timestamp: line.timestamp)
-            lineCount += 1
-        }
-
-        while true {
-            guard let chunk = try? handle.read(upToCount: chunkSize) else { break }
-            if chunk.isEmpty {
-                break
-            }
-            buffer.append(chunk)
-            while let idx = buffer.firstIndex(of: newline) {
-                let lineRange = buffer.startIndex..<idx
-                let line = buffer[lineRange]
-                let removeEnd = buffer.index(after: idx)
-                buffer.removeSubrange(buffer.startIndex..<removeEnd)
-                if line.isEmpty { continue }
-                let trimmed = line.last == carriageReturn ? line.dropLast() : line[...]
-                if !trimmed.isEmpty { processLine(Data(trimmed)) }
-            }
-        }
-        if !buffer.isEmpty {
-            let trimmed = buffer.last == carriageReturn ? buffer.dropLast() : buffer[...]
-            if !trimmed.isEmpty { processLine(Data(trimmed)) }
-        }
-
-        activeAccumulator.flush()
-        return accumulator.buildSummary(
-            url: url,
-            fileSize: fileSize,
-            lineCount: lineCount,
-            activeDuration: activeAccumulator.total > 0 ? activeAccumulator.total : nil
-        )
-    }
-
     func parse(at url: URL, fileSize: UInt64? = nil) -> ClaudeParsedLog? {
         // Skip agent-*.jsonl files entirely (sidechain warmup files)
         let filename = url.deletingPathExtension().lastPathComponent
@@ -125,17 +73,42 @@ struct ClaudeSessionParser {
         var activeAccumulator = ActiveDurationAccumulator()
         var rows: [SessionRow] = []
         rows.reserveCapacity(256)
+        var seenUserMessageIds: Set<String> = []
+        var seenAssistantMessageIds: Set<String> = []
+        var seenToolUseIds: Set<String> = []
+        var dedupUserCount = 0
+        var dedupAssistantCount = 0
+        var dedupToolCount = 0
 
         for var slice in data.split(separator: newline, omittingEmptySubsequences: true) {
             if slice.last == carriageReturn { slice = slice.dropLast() }
             guard !slice.isEmpty else { continue }
             guard let line = decodeLine(Data(slice)) else { continue }
             if line.isSidechain == true { continue }
-            let renderedText = line.message.flatMap(renderFlatText)
+            let renderedText = line.message.flatMap(Self.renderFlatText)
             let model = line.message?.model
             let usageTokens = line.message?.usage?.totalTokens
             accumulator.consume(line, renderedText: renderedText, model: model, usageTokens: usageTokens)
             activeAccumulator.observe(type: line.type, timestamp: line.timestamp)
+            let hasText = ClaudeSessionParser.hasRenderableText(line.message)
+            if let type = line.type {
+                let messageId = line.message?.id
+                switch type {
+                case "user":
+                    if hasText, messageId.map({ seenUserMessageIds.insert($0).inserted }) ?? true {
+                        dedupUserCount &+= 1
+                    }
+                case "assistant":
+                    let newTools = ClaudeSessionParser.countToolUses(in: line.message, seen: &seenToolUseIds)
+                    if newTools > 0 { dedupToolCount &+= newTools }
+                    if hasText {
+                        let isNew = messageId.map({ seenAssistantMessageIds.insert($0).inserted }) ?? true
+                        if isNew { dedupAssistantCount &+= 1 }
+                    }
+                default:
+                    break
+                }
+            }
             rows.append(contentsOf: convert(line))
         }
         activeAccumulator.flush()
@@ -158,7 +131,126 @@ struct ClaudeSessionParser {
         var combinedRows: [SessionRow] = [metaRow]
         if let contextRow { combinedRows.append(contextRow) }
         combinedRows.append(contentsOf: rows)
-        return ClaudeParsedLog(summary: summary, rows: combinedRows)
+        let finalSummary = adjustCounts(
+            summary: summary,
+            userCount: dedupUserCount,
+            assistantCount: dedupAssistantCount,
+            toolCount: dedupToolCount)
+        let timelineAdjusted = adjustCountsFromTimeline(summary: finalSummary, rows: combinedRows)
+        return ClaudeParsedLog(summary: timelineAdjusted, rows: combinedRows)
+    }
+
+    private func adjustCounts(
+        summary: SessionSummary,
+        userCount: Int,
+        assistantCount: Int,
+        toolCount: Int
+    ) -> SessionSummary {
+        let adjustedUser = userCount > 0 ? userCount : summary.userMessageCount
+        let adjustedAssistant = assistantCount > 0 ? assistantCount : summary.assistantMessageCount
+        let adjustedTools = toolCount > 0 ? toolCount : summary.toolInvocationCount
+
+        var adjustedResponseCounts = summary.responseCounts
+        if toolCount > 0 {
+            adjustedResponseCounts["tool_call"] = toolCount
+        }
+        let adjustedEventCount = adjustedUser + adjustedAssistant + adjustedResponseCounts.values.reduce(0, +)
+
+        var adjusted = SessionSummary(
+            id: summary.id,
+            fileURL: summary.fileURL,
+            fileSizeBytes: summary.fileSizeBytes,
+            startedAt: summary.startedAt,
+            endedAt: summary.endedAt,
+            activeDuration: summary.activeDuration,
+            cliVersion: summary.cliVersion,
+            cwd: summary.cwd,
+            originator: summary.originator,
+            instructions: summary.instructions,
+            model: summary.model,
+            approvalPolicy: summary.approvalPolicy,
+            userMessageCount: adjustedUser,
+            assistantMessageCount: adjustedAssistant,
+            toolInvocationCount: adjustedTools,
+            responseCounts: adjustedResponseCounts,
+            turnContextCount: summary.turnContextCount,
+            totalTokens: summary.totalTokens,
+            tokenBreakdown: summary.tokenBreakdown,
+            eventCount: adjustedEventCount,
+            lineCount: summary.lineCount,
+            lastUpdatedAt: summary.lastUpdatedAt,
+            source: summary.source,
+            remotePath: summary.remotePath,
+            userTitle: summary.userTitle,
+            userComment: summary.userComment,
+            taskId: summary.taskId
+        )
+        adjusted.parseLevel = summary.parseLevel
+        return adjusted
+    }
+
+    /// Align counts with the visible timeline logic to keep list metrics consistent.
+    private func adjustCountsFromTimeline(
+        summary: SessionSummary,
+        rows: [SessionRow]
+    ) -> SessionSummary {
+        let loader = SessionTimelineLoader()
+        let turns = loader.turns(from: rows)
+        let turnCount = turns.count
+        // Preserve the tool invocation count from the previous adjustCounts() step,
+        // which correctly counts tool_use blocks in assistant messages.
+        // Do NOT count tool outputs here (actor == .tool), as those are results, not calls.
+        return ClaudeSessionParser.normalizeCounts(
+            summary: summary,
+            turnCount: turnCount,
+            assistantTextCount: turnCount,
+            toolCount: summary.toolInvocationCount)
+    }
+
+    /// Normalize counts to CodMate's definition: one user→assistant exchange equals one message.
+    private static func normalizeCounts(
+        summary: SessionSummary,
+        turnCount: Int,
+        assistantTextCount: Int,
+        toolCount: Int
+    ) -> SessionSummary {
+        let turns = max(turnCount, 0)
+        let assistant = turns > 0 ? max(min(turns, assistantTextCount), turns) : assistantTextCount
+        let tools = max(toolCount, 0)
+
+        var counts = summary.responseCounts
+        counts["tool_call"] = tools
+
+        return SessionSummary(
+            id: summary.id,
+            fileURL: summary.fileURL,
+            fileSizeBytes: summary.fileSizeBytes,
+            startedAt: summary.startedAt,
+            endedAt: summary.endedAt,
+            activeDuration: summary.activeDuration,
+            cliVersion: summary.cliVersion,
+            cwd: summary.cwd,
+            originator: summary.originator,
+            instructions: summary.instructions,
+            model: summary.model,
+            approvalPolicy: summary.approvalPolicy,
+            userMessageCount: turns,
+            assistantMessageCount: assistant,
+            toolInvocationCount: tools,
+            responseCounts: counts,
+            turnContextCount: summary.turnContextCount,
+            totalTokens: summary.totalTokens,
+            tokenBreakdown: summary.tokenBreakdown,
+            eventCount: turns + tools,
+            lineCount: summary.lineCount,
+            lastUpdatedAt: summary.lastUpdatedAt,
+            source: summary.source,
+            remotePath: summary.remotePath,
+            userTitle: summary.userTitle,
+            userComment: summary.userComment,
+            taskId: summary.taskId,
+            parseLevel: .enriched  // Mark as enriched with timeline-based turn counting
+        )
     }
 
     private func decodeLine(_ data: Data) -> ClaudeLogLine? {
@@ -202,13 +294,13 @@ struct ClaudeSessionParser {
 
     private func convertUser(_ line: ClaudeLogLine, timestamp: Date) -> [SessionRow] {
         guard let message = line.message else { return [] }
-        let blocks = blocks(from: message)
+        let blocks = Self.blocks(from: message)
         var rows: [SessionRow] = []
 
         for block in blocks {
             switch block.type {
             case "text", nil:
-                if let text = renderText(from: block), !text.isEmpty {
+                if let text = Self.renderText(from: block), !text.isEmpty {
                     let payload = EventMessagePayload(
                         type: "user_message",
                         message: text,
@@ -219,7 +311,7 @@ struct ClaudeSessionParser {
                     rows.append(SessionRow(timestamp: timestamp, kind: .eventMessage(payload)))
                 }
             case "tool_result":
-                if let text = renderText(from: block), !text.isEmpty {
+                if let text = Self.renderText(from: block), !text.isEmpty {
                     let item = ResponseItemPayload(
                         type: "tool_output",
                         status: nil,
@@ -237,7 +329,7 @@ struct ClaudeSessionParser {
         }
 
         if let toolResult = line.toolUseResult,
-           let rendered = stringify(toolResult),
+           let rendered = Self.stringify(toolResult),
            !rendered.isEmpty {
             let payload = EventMessagePayload(
                 type: "tool_output",
@@ -254,13 +346,13 @@ struct ClaudeSessionParser {
 
     private func convertAssistant(_ line: ClaudeLogLine, timestamp: Date) -> [SessionRow] {
         guard let message = line.message else { return [] }
-        let blocks = blocks(from: message)
+        let blocks = Self.blocks(from: message)
         var rows: [SessionRow] = []
 
         for block in blocks {
             switch block.type {
             case "text", nil:
-                if let text = renderText(from: block), !text.isEmpty {
+                if let text = Self.renderText(from: block), !text.isEmpty {
                     let payload = EventMessagePayload(
                         type: "agent_message",
                         message: text,
@@ -270,8 +362,22 @@ struct ClaudeSessionParser {
                         rateLimits: nil)
                     rows.append(SessionRow(timestamp: timestamp, kind: .eventMessage(payload)))
                 }
+            case "thinking":
+                // Extended thinking block - count as reasoning
+                if let text = Self.renderText(from: block), !text.isEmpty {
+                    let item = ResponseItemPayload(
+                        type: "reasoning",
+                        status: nil,
+                        callID: block.id,
+                        name: nil,
+                        content: [ResponseContentBlock(type: "text", text: text)],
+                        summary: nil,
+                        encryptedContent: nil,
+                        role: "assistant")
+                    rows.append(SessionRow(timestamp: timestamp, kind: .responseItem(item)))
+                }
             case "tool_use":
-                let rendered = block.input.flatMap { stringify($0) } ?? ""
+                let rendered = block.input.flatMap { Self.stringify($0) } ?? ""
                 let contentBlocks = rendered.isEmpty
                     ? []
                     : [ResponseContentBlock(type: "text", text: rendered)]
@@ -295,7 +401,7 @@ struct ClaudeSessionParser {
 
     private func convertSystem(_ line: ClaudeLogLine, timestamp: Date) -> [SessionRow] {
         guard let message = line.message else { return [] }
-        let text = renderFlatText(message) ?? renderText(from: blocks(from: message).first)
+        let text = Self.renderFlatText(message) ?? Self.renderText(from: Self.blocks(from: message).first)
         guard let text, !text.isEmpty else { return [] }
         let payload = EventMessagePayload(
             type: "system_message",
@@ -371,7 +477,7 @@ struct ClaudeSessionParser {
         return summary
     }
 
-    private func blocks(from message: ClaudeMessage) -> [ClaudeContentBlock] {
+    private static func blocks(from message: ClaudeMessage) -> [ClaudeContentBlock] {
         switch message.content {
         case .string(let text):
             return [ClaudeContentBlock(type: "text", text: text, id: nil, name: nil, input: nil, toolUseId: nil, content: nil)]
@@ -382,7 +488,7 @@ struct ClaudeSessionParser {
         }
     }
 
-    private func renderFlatText(_ message: ClaudeMessage) -> String? {
+    private static func renderFlatText(_ message: ClaudeMessage) -> String? {
         switch message.content {
         case .string(let text):
             return text
@@ -394,7 +500,7 @@ struct ClaudeSessionParser {
         }
     }
 
-    private func renderText(from block: ClaudeContentBlock?) -> String? {
+    private static func renderText(from block: ClaudeContentBlock?) -> String? {
         guard let block else { return nil }
         if let text = block.text, !text.isEmpty { return text }
         if let rendered = block.content.flatMap({ stringify($0) }), !rendered.isEmpty {
@@ -406,7 +512,7 @@ struct ClaudeSessionParser {
         return nil
     }
 
-    private func stringify(_ value: JSONValue?) -> String? {
+    private static func stringify(_ value: JSONValue?) -> String? {
         guard let value else { return nil }
         switch value {
         case .string(let str):
@@ -445,6 +551,7 @@ struct ClaudeSessionParser {
         var tokenOutput: Int = 0
         var tokenCacheRead: Int = 0
         var tokenCacheCreation: Int = 0
+        var seenMessageIds: Set<String> = []
 
         mutating func consume(
             _ line: ClaudeLogLine,
@@ -467,7 +574,10 @@ struct ClaudeSessionParser {
             if self.model == nil, let model, !model.isEmpty {
                 self.model = model
             }
-            if let usage = line.message?.usage {
+            let messageId = line.message?.id
+            let isNewMessage = messageId.map { seenMessageIds.insert($0).inserted } ?? true
+
+            if isNewMessage, let usage = line.message?.usage {
                 totalTokens &+= usage.totalTokens
                 tokenInput &+= usage.inputTokens ?? 0
                 tokenOutput &+= usage.outputTokens ?? 0
@@ -476,7 +586,7 @@ struct ClaudeSessionParser {
                     (usage.cacheCreation?.ephemeral5m ?? 0) +
                     (usage.cacheCreation?.ephemeral1h ?? 0)
                 tokenCacheCreation &+= creation
-            } else if let usageTokens, usageTokens > 0 {
+            } else if isNewMessage, let usageTokens, usageTokens > 0 {
                 totalTokens &+= usageTokens
             }
         }
@@ -534,12 +644,14 @@ struct ClaudeSessionParser {
     }
 
     private struct ClaudeMessage: Decodable {
+        let id: String?
         let role: String?
         let model: String?
         let content: ClaudeMessageContent?
         let usage: ClaudeUsage?
 
         enum CodingKeys: String, CodingKey {
+            case id
             case role
             case model
             case content
@@ -612,109 +724,34 @@ struct ClaudeSessionParser {
         let content: JSONValue?
     }
 
-    private struct SummaryAccumulator {
-        var sessionId: String?
-        var version: String?
-        var cwd: String?
-        var model: String?
-        var firstTimestamp: Date?
-        var lastTimestamp: Date?
-        var userMessageCount = 0
-        var assistantMessageCount = 0
-        var toolInvocationCount = 0
-        var responseCounts: [String: Int] = [:]
-        var totalTokens = 0
-        var tokenInput = 0
-        var tokenOutput = 0
-        var tokenCacheRead = 0
-        var tokenCacheCreation = 0
-
-        mutating func consume(_ line: ClaudeLogLine) {
-            guard let type = line.type else { return }
-            if let sid = line.sessionId, sessionId == nil { sessionId = sid }
-            if let ver = line.version, version == nil { version = ver }
-            if let path = line.cwd, cwd == nil { cwd = path }
-            if let m = line.message?.model, model == nil, !m.isEmpty { model = m }
-            if let ts = line.timestamp {
-                if firstTimestamp == nil || ts < firstTimestamp! { firstTimestamp = ts }
-                if lastTimestamp == nil || ts > lastTimestamp! { lastTimestamp = ts }
-            }
-
-            switch type {
-            case "user":
-                userMessageCount &+= 1
-            case "assistant":
-                assistantMessageCount &+= 1
-                if let usage = line.message?.usage {
-                    totalTokens &+= usage.totalTokens
-                    tokenInput &+= usage.inputTokens ?? 0
-                    tokenOutput &+= usage.outputTokens ?? 0
-                    tokenCacheRead &+= usage.cacheReadInputTokens ?? 0
-                    let creation = (usage.cacheCreationInputTokens ?? 0) +
-                        (usage.cacheCreation?.ephemeral5m ?? 0) +
-                        (usage.cacheCreation?.ephemeral1h ?? 0)
-                    tokenCacheCreation &+= creation
+    private static func countToolUses(in message: ClaudeMessage?, seen: inout Set<String>) -> Int {
+        guard let message else { return 0 }
+        switch message.content {
+        case .blocks(let blocks):
+            return blocks.reduce(0) { partial, block in
+                guard block.type == "tool_use" else { return partial }
+                if let id = block.id {
+                    return seen.insert(id).inserted ? partial + 1 : partial
                 }
-                toolInvocationCount &+= countToolCalls(in: line.message)
-            default:
-                break
+                return partial + 1
             }
+        case .string, .none:
+            return 0
         }
+    }
 
-        func buildSummary(
-            url: URL,
-            fileSize: UInt64?,
-            lineCount: Int,
-            activeDuration: TimeInterval?
-        ) -> SessionSummary? {
-            guard let sessionId, let started = firstTimestamp, let cwd else { return nil }
-            let breakdownTotal = tokenInput + tokenOutput + tokenCacheRead + tokenCacheCreation
-            let breakdown = breakdownTotal > 0
-                ? SessionTokenBreakdown(
-                    input: tokenInput,
-                    output: tokenOutput,
-                    cacheRead: tokenCacheRead,
-                    cacheCreation: tokenCacheCreation)
-                : nil
-        let summary = SessionSummary(
-            id: sessionId,
-            fileURL: url,
-            fileSizeBytes: fileSize,
-            startedAt: started,
-            endedAt: lastTimestamp,
-            activeDuration: activeDuration,
-            cliVersion: "claude-code \(version ?? "unknown")",
-            cwd: cwd,
-            originator: "Claude Code",
-            instructions: nil,
-            model: model,
-                approvalPolicy: nil,
-                userMessageCount: userMessageCount,
-                assistantMessageCount: assistantMessageCount,
-                toolInvocationCount: toolInvocationCount,
-                responseCounts: responseCounts,
-                turnContextCount: 0,
-                totalTokens: totalTokens,
-                tokenBreakdown: breakdown,
-                eventCount: userMessageCount + assistantMessageCount,
-                lineCount: lineCount,
-                lastUpdatedAt: lastTimestamp,
-                source: .claudeLocal,
-                remotePath: nil
-            )
-            return summary
-        }
-
-        private func countToolCalls(in message: ClaudeMessage?) -> Int {
-            guard let message else { return 0 }
-            switch message.content {
-            case .blocks(let blocks):
-                return blocks.reduce(0) { partial, block in
-                    partial + (block.type == "tool_use" ? 1 : 0)
-                }
-            case .string, .none:
-                return 0
+    private static func hasRenderableText(_ message: ClaudeMessage?) -> Bool {
+        guard let message else { return false }
+        switch message.content {
+        case .string(let text):
+            return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .blocks(let blocks):
+            return blocks.contains { block in
+                guard let rendered = renderText(from: block) else { return false }
+                return !rendered.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
+        case .none:
+            return false
         }
     }
 }

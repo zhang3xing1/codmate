@@ -744,7 +744,6 @@ private struct ProjectTreeNodeView: View {
     }
     await MainActor.run {
       vm.scheduleApplyFilters()
-      vm.scheduleViewUpdate()
     }
     await SystemNotifier.shared.notify(
       title: "CodMate",

@@ -50,7 +50,6 @@ actor ClaudeSessionProvider {
 
     func sessions(scope: SessionLoadScope) async throws -> [SessionSummary] {
         guard cacheStore != nil else { throw SessionProviderCacheError.cacheUnavailable }
-        let preferFullInitialParse = ((try? await cacheStore?.fetchMeta().sessionCount) ?? 0) == 0
         guard let root else { return [] }
         guard let enumerator = fileManager.enumerator(
             at: root,
@@ -69,16 +68,8 @@ actor ClaudeSessionProvider {
             guard values.isRegularFile == true else { continue }
             let fileSize = resolveFileSize(for: url, resourceValues: values)
             let mtime = values.contentModificationDate
-            let summary: SessionSummary?
-            if preferFullInitialParse {
-                summary = try await cachedSummary(for: url, modificationDate: mtime, fileSize: fileSize)
-                    ?? parser.parse(at: url, fileSize: fileSize)?.summary
-                    ?? parser.parseSummary(at: url, fileSize: fileSize)
-            } else {
-                summary = try await cachedSummary(for: url, modificationDate: mtime, fileSize: fileSize)
-                    ?? parser.parseSummary(at: url, fileSize: fileSize)
-                    ?? parser.parse(at: url, fileSize: fileSize)?.summary
-            }
+            let summary = try await cachedSummary(for: url, modificationDate: mtime, fileSize: fileSize)
+                ?? parser.parse(at: url, fileSize: fileSize)?.summary
             guard let summary else { continue }
             guard matches(scope: scope, summary: summary) else { continue }
             cache(summary: summary, for: url, modificationDate: mtime, fileSize: fileSize)
@@ -101,7 +92,6 @@ actor ClaudeSessionProvider {
     /// Directory should be the original project cwd; it will be encoded to Claude's folder name.
     func sessions(inProjectDirectory directory: String) async throws -> [SessionSummary] {
         guard cacheStore != nil else { throw SessionProviderCacheError.cacheUnavailable }
-        let preferFullInitialParse = ((try? await cacheStore?.fetchMeta().sessionCount) ?? 0) == 0
         guard let root else { return [] }
         let folder = encodeProjectFolder(from: directory)
         let projectURL = root.appendingPathComponent(folder, isDirectory: true)
@@ -120,16 +110,8 @@ actor ClaudeSessionProvider {
             guard values.isRegularFile == true else { continue }
             let fileSize = resolveFileSize(for: url, resourceValues: values)
             let mtime = values.contentModificationDate
-            let summary: SessionSummary?
-            if preferFullInitialParse {
-                summary = try await cachedSummary(for: url, modificationDate: mtime, fileSize: fileSize)
-                    ?? parser.parse(at: url, fileSize: fileSize)?.summary
-                    ?? parser.parseSummary(at: url, fileSize: fileSize)
-            } else {
-                summary = try await cachedSummary(for: url, modificationDate: mtime, fileSize: fileSize)
-                    ?? parser.parseSummary(at: url, fileSize: fileSize)
-                    ?? parser.parse(at: url, fileSize: fileSize)?.summary
-            }
+            let summary = try await cachedSummary(for: url, modificationDate: mtime, fileSize: fileSize)
+                ?? parser.parse(at: url, fileSize: fileSize)?.summary
 
             if let summary {
                 cache(summary: summary, for: url, modificationDate: mtime, fileSize: fileSize)

@@ -114,6 +114,13 @@ enum SessionIndexSQLiteStoreError: Error {
       }
       guard let payload = columnData(stmt, index: 0) else { return nil }
       let summary = try JSONDecoder().decode(SessionSummary.self, from: payload)
+
+      // Invalidate cache if Claude session was parsed with old schema (before timeline-based counting)
+      if summary.source.baseKind == .claude && summary.parseLevel != .enriched {
+        logger.info("cache miss (schema upgrade) for path=\(path, privacy: .public)")
+        return nil
+      }
+
       logger.info("cache hit (path+mtime) kind=\(summary.source.baseKind.rawValue, privacy: .public) path=\(path, privacy: .public)")
       return summary
     }

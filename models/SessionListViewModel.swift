@@ -862,7 +862,7 @@ final class SessionListViewModel: ObservableObject {
     diagLogger.log("refreshSelectedSessions: start sessionIds=\(sessionIds.count, privacy: .public) force=\(force, privacy: .public) ts=\(self.ts(), format: .fixed(precision: 3))")
     let refreshBegan = Date()
 
-    // Pull cached file metadata (mtime/size) to avoid re-parsing unchanged files
+    // Pull cached file metadata (mtime/size) to avoid re-parsing unchanged files (Codex only)
     let cachedRecords = await indexer.fetchRecords(sessionIds: sessionIds)
     let cachedById = Dictionary(uniqueKeysWithValues: cachedRecords.map { ($0.summary.id, $0) })
 
@@ -873,96 +873,130 @@ final class SessionListViewModel: ObservableObject {
       return false
     }
 
-    // 2. Check file mtime/size changes
-    var needsRefresh: [(id: String, url: URL)] = []
-    for session in selectedSessions {
-      let record = cachedById[session.id]
-      let fileURL = record.flatMap { URL(fileURLWithPath: $0.filePath) } ?? session.fileURL
-      guard let values = try? fileURL.resourceValues(
-        forKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]),
-        values.isRegularFile == true
-      else {
-        // Missing file or unreadable: refresh to reconcile state
-        needsRefresh.append((session.id, fileURL))
-        continue
-      }
+    // Split by source so we can use the correct parser
+    let codexSessions = selectedSessions.filter { $0.source.baseKind == .codex }
+    let claudeSessions = selectedSessions.filter { $0.source.baseKind == .claude }
 
-      if force {
-        needsRefresh.append((session.id, fileURL))
-        continue
-      }
+    var refreshedSummaries: [SessionSummary] = []
 
-      var hasComparableMetric = false
-      var changed = false
+    // 2. Codex: mtime/size check + reindex via SessionIndexer
+    if !codexSessions.isEmpty {
+      var needsRefresh: [(id: String, url: URL)] = []
+      for session in codexSessions {
+        let record = cachedById[session.id]
+        let fileURL = record.flatMap { URL(fileURLWithPath: $0.filePath) } ?? session.fileURL
+        guard let values = try? fileURL.resourceValues(
+          forKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]),
+          values.isRegularFile == true
+        else {
+          // Missing file or unreadable: refresh to reconcile state
+          needsRefresh.append((session.id, fileURL))
+          continue
+        }
 
-      if let cachedMtime = record?.fileModificationTime, let mtime = values.contentModificationDate {
-        hasComparableMetric = true
-        if mtime > cachedMtime.addingTimeInterval(0.001) {
-          changed = true
+        if force {
+          needsRefresh.append((session.id, fileURL))
+          continue
+        }
+
+        var hasComparableMetric = false
+        var changed = false
+
+        if let cachedMtime = record?.fileModificationTime, let mtime = values.contentModificationDate {
+          hasComparableMetric = true
+          if mtime > cachedMtime.addingTimeInterval(0.001) {
+            changed = true
+          }
+        }
+
+        if let cachedSize = record?.fileSize, let fsize = values.fileSize.map({ UInt64($0) }) {
+          hasComparableMetric = true
+          if cachedSize != fsize {
+            changed = true
+          }
+        }
+
+        // If we had no cached metrics, err on the side of refreshing
+        if !hasComparableMetric || changed {
+          needsRefresh.append((session.id, fileURL))
         }
       }
 
-      if let cachedSize = record?.fileSize, let fsize = values.fileSize.map({ UInt64($0) }) {
-        hasComparableMetric = true
-        if cachedSize != fsize {
-          changed = true
+      if !needsRefresh.isEmpty {
+        diagLogger.log("refreshSelectedSessions (codex): refreshing \(needsRefresh.count, privacy: .public) files")
+        let urlsToRefresh = needsRefresh.map { $0.url }
+        do {
+          let codexSummaries = try await indexer.reindexFiles(urlsToRefresh)
+          refreshedSummaries.append(contentsOf: codexSummaries)
+        } catch {
+          diagLogger.error("refreshSelectedSessions: codex reindex failed: \(error.localizedDescription, privacy: .public)")
         }
-      }
-
-      // If we had no cached metrics, err on the side of refreshing
-      if !hasComparableMetric || changed {
-        needsRefresh.append((session.id, fileURL))
       }
     }
 
-    guard !needsRefresh.isEmpty else {
+    // 3. Claude/Gemini: always parse with provider-specific parsers when forced or when selection includes them.
+    if !claudeSessions.isEmpty {
+      let claudeParser = ClaudeSessionParser()
+
+      func parseSummary(for session: SessionSummary) -> SessionSummary? {
+        let url = session.fileURL
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+        let fileSize = values?.fileSize.flatMap { UInt64($0) }
+        switch session.source.baseKind {
+        case .claude:
+          return claudeParser.parse(at: url, fileSize: fileSize)?.summary
+        default:
+          return nil
+        }
+      }
+
+      for session in claudeSessions {
+        if let summary = parseSummary(for: session) {
+          var merged = summary
+          // Preserve user metadata (title/comment/task)
+          merged.userTitle = session.userTitle
+          merged.userComment = session.userComment
+          merged.taskId = session.taskId
+          refreshedSummaries.append(merged)
+        }
+      }
+    }
+
+    guard !refreshedSummaries.isEmpty else {
       diagLogger.log("refreshSelectedSessions: no changes detected, skipping refresh")
       return false
     }
 
-    diagLogger.log("refreshSelectedSessions: refreshing \(needsRefresh.count, privacy: .public) files")
-
-    // 3. Reindex only the changed files
-    let urlsToRefresh = needsRefresh.map { $0.url }
-    do {
-      let refreshedSummaries = try await indexer.reindexFiles(urlsToRefresh)
-
-      // 4. Update allSessions with refreshed data
-      var didChange = false
-      await MainActor.run {
-        var updatedSessions = allSessions
-        for refreshed in refreshedSummaries {
-          if let index = updatedSessions.firstIndex(where: { $0.id == refreshed.id }) {
-            // Preserve user metadata (title, comment, taskId)
-            var merged = refreshed
-            merged.userTitle = updatedSessions[index].userTitle
-            merged.userComment = updatedSessions[index].userComment
-            merged.taskId = updatedSessions[index].taskId
-            if updatedSessions[index] != merged {
-              updatedSessions[index] = merged
-              didChange = true
-            }
+    // 4. Update allSessions with refreshed data
+    var didChange = false
+    await MainActor.run {
+      var updatedSessions = allSessions
+      for refreshed in refreshedSummaries {
+        if let index = updatedSessions.firstIndex(where: { $0.id == refreshed.id }) {
+          var merged = refreshed
+          merged.userTitle = updatedSessions[index].userTitle
+          merged.userComment = updatedSessions[index].userComment
+          merged.taskId = updatedSessions[index].taskId
+          if updatedSessions[index] != merged {
+            updatedSessions[index] = merged
+            didChange = true
           }
         }
-        if didChange {
-          allSessions = updatedSessions
-        }
       }
-
-      // 5. Re-apply filters to update UI if anything changed
       if didChange {
-        scheduleFiltersUpdate()
+        allSessions = updatedSessions
       }
-
-      let elapsed = Date().timeIntervalSince(refreshBegan)
-      diagLogger.log("refreshSelectedSessions: completed in \(elapsed, format: .fixed(precision: 3))s, refreshed=\(refreshedSummaries.count, privacy: .public)")
-
-      return true
-
-    } catch {
-      diagLogger.error("refreshSelectedSessions: failed with error: \(error.localizedDescription, privacy: .public)")
-      return false
     }
+
+    // 5. Re-apply filters to update UI if anything changed
+    if didChange {
+      scheduleFiltersUpdate()
+    }
+
+    let elapsed = Date().timeIntervalSince(refreshBegan)
+    diagLogger.log("refreshSelectedSessions: completed in \(elapsed, format: .fixed(precision: 3))s, refreshed=\(refreshedSummaries.count, privacy: .public)")
+
+    return didChange
   }
 
   /// Schedule a debounced refresh for selected sessions.

@@ -3,7 +3,9 @@ import SwiftUI
 
 @MainActor
 final class CodexVM: ObservableObject {
-  let builtinModels: [String] = ["gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.1-codex-mini"]
+  let builtinModels: [String] = [
+    "gpt-5.2", "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.1-codex-mini"
+  ]
   enum ReasoningEffort: String, CaseIterable, Identifiable {
     case minimal, low, medium, high
     var id: String { rawValue }

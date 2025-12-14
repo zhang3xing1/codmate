@@ -19,6 +19,8 @@ struct SessionProviderContext: Sendable {
   let dateRange: (Date, Date)?
   /// Optional project filter (single project preferred).
   let projectIds: Set<String>?
+  /// When true, bypass cache-only shortcuts and touch the filesystem to discover new sessions.
+  let forceFilesystemScan: Bool
   let cachePolicy: SessionProviderCachePolicy
 }
 

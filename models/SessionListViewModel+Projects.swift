@@ -46,8 +46,10 @@ extension SessionListViewModel {
                 }
                 Task { [weak self] in
                     guard let self else { return }
-                    await self.refreshIncrementalForClaudeToday()
-                    await self.refreshIncrementalForGeminiToday()
+                    async let codex: Void = self.refreshIncrementalForNewCodexToday()
+                    async let claude: Void = self.refreshIncrementalForClaudeToday()
+                    async let gemini: Void = self.refreshIncrementalForGeminiToday()
+                    _ = await (codex, claude, gemini)
                 }
             }
         } else {

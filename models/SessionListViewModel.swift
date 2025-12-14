@@ -752,6 +752,7 @@ final class SessionListViewModel: ObservableObject {
       dateDimension: dateDimension,
       dateRange: currentDateRange(),
       projectIds: singleSelectedProject(),
+      forceFilesystemScan: false,
       cachePolicy: .cacheOnly
     )
     let refreshContext = SessionProviderContext(
@@ -762,6 +763,7 @@ final class SessionListViewModel: ObservableObject {
       dateDimension: dateDimension,
       dateRange: currentDateRange(),
       projectIds: singleSelectedProject(),
+      forceFilesystemScan: force,
       cachePolicy: .refresh
     )
 
@@ -1190,7 +1192,9 @@ final class SessionListViewModel: ObservableObject {
 
   private func recomputeActiveUpdatingIDs() {
     let cutoff = Date().addingTimeInterval(-3.0)
-    activeUpdatingIDs = Set(activityHeartbeat.filter { $0.value > cutoff }.keys)
+    let newIDs = Set(activityHeartbeat.filter { $0.value > cutoff }.keys)
+    guard newIDs != activeUpdatingIDs else { return }
+    activeUpdatingIDs = newIDs
   }
 
   func isActivelyUpdating(_ id: String) -> Bool { activeUpdatingIDs.contains(id) }

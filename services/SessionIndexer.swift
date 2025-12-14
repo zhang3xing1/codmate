@@ -47,19 +47,20 @@ actor SessionIndexer {
     dateRange: (Date, Date)? = nil,
     projectIds: Set<String>? = nil,
     projectDirectories: [String]? = nil,
-    dateDimension: DateDimension = .updated
+    dateDimension: DateDimension = .updated,
+    forceFilesystemScan: Bool = false
   ) async throws -> [SessionSummary] {
     let meta = try await ensureCacheAvailable()
     let preferFullInitialParse = meta.sessionCount == 0
     // First, try cached meta fast path so repeated .all refreshes don't re-enumerate
-    if case .all = scope, let cached = try await cachedAllSummariesFromMeta() {
+    if !forceFilesystemScan, case .all = scope, let cached = try await cachedAllSummariesFromMeta() {
       return cached
     }
 
     guard !isRefreshing else {
       logger.debug("Refresh skipped: already in progress for scope=\(String(describing: scope), privacy: .public)")
       // When a refresh is already running, still try to surface cached data for ALL scope
-      if case .all = scope, let cached = try await cachedAllSummariesFromMeta() {
+      if !forceFilesystemScan, case .all = scope, let cached = try await cachedAllSummariesFromMeta() {
         return cached
       }
       return []
@@ -540,7 +541,8 @@ actor SessionIndexer {
       return []
     }
 
-    // Updated single-day fast path: if cached records cover the day, avoid wide enumeration
+    // Updated single-day fast path: use cached records for cross-day directories, but still
+    // enumerate the created-day directory to discover brand-new sessions not in SQLite yet.
     if let cachedRecords,
        let dateRange,
        dateDimension == .updated,
@@ -549,21 +551,41 @@ actor SessionIndexer {
       let start = dateRange.0
       let end = dateRange.1
       var candidates: [URL] = []
+      var seenPaths: Set<String> = []
       for record in cachedRecords.values {
         let updated = record.summary.lastUpdatedAt ?? record.summary.endedAt ?? record.summary.startedAt
         if updated < start || updated > end { continue }
         let url = URL(fileURLWithPath: record.filePath)
         if fileManager.fileExists(atPath: url.path) {
+          seenPaths.insert(url.path)
           candidates.append(url)
-        } else {
-          // Keep directory for fallback enumeration below
-          if let dir = directoryIfExists(url.deletingLastPathComponent()) {
-            urls.append(dir)
+        }
+      }
+
+      if let dayDir = dayDirectory(root: root, date: start),
+         let enumerator = fileManager.enumerator(
+          at: dayDir,
+          includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey] as [URLResourceKey],
+          options: [.skipsHiddenFiles, .skipsPackageDescendants]
+         )
+      {
+        while let obj = enumerator.nextObject() {
+          guard let fileURL = obj as? URL else { continue }
+          guard fileURL.pathExtension.lowercased() == "jsonl" else { continue }
+          let values = try? fileURL.resourceValues(
+            forKeys: Set<URLResourceKey>([.isRegularFileKey, .contentModificationDateKey]))
+          guard values?.isRegularFile == true else { continue }
+          if let mdate = values?.contentModificationDate, (mdate < start || mdate > end) {
+            continue
+          }
+          if seenPaths.insert(fileURL.path).inserted {
+            candidates.append(fileURL)
           }
         }
       }
+
       if !candidates.isEmpty {
-        logger.info("Updated-day fast path: returning \(candidates.count, privacy: .public) cached files without enumeration")
+        logger.info("Updated-day fast path: returning \(candidates.count, privacy: .public) files (cache + today dir)")
         return candidates
       }
     }
@@ -1320,7 +1342,8 @@ extension SessionIndexer: SessionProvider {
         dateRange: context.dateRange,
         projectIds: context.projectIds,
         projectDirectories: context.projectDirectories,
-        dateDimension: context.dateDimension
+        dateDimension: context.dateDimension,
+        forceFilesystemScan: context.forceFilesystemScan
       )
       let coverage = await currentCoverage()
       return SessionProviderResult(

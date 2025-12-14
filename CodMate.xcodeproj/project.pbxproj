@@ -15,7 +15,7 @@
 		41A001282B30040000000005 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 41A001272B30040000000004 /* PrivacyInfo.xcprivacy */; };
 		41A0012A2B30050000000001 /* providers.json in Resources */ = {isa = PBXBuildFile; fileRef = 41A001292B30050000000001 /* providers.json */; };
 		5A1A6B062F3A8D1C00A1B001 /* CodMateNotifyMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1A6B042F3A8D1C00A1B001 /* CodMateNotifyMain.swift */; };
-		5A1A6B0B2F3A8D1D00A1B001 /* codmate-notify in CopyFiles */ = {isa = PBXBuildFile; fileRef = 5A1A6B052F3A8D1C00A1B001 /* codmate-notify */; };
+		5A1A6B0B2F3A8D1D00A1B001 /* codmate-notify in CopyFiles */ = {isa = PBXBuildFile; fileRef = 5A1A6B052F3A8D1C00A1B001 /* codmate-notify */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -183,7 +183,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastSwiftUpdateCheck = 1530;
-				LastUpgradeCheck = 2610;
+				LastUpgradeCheck = 2620;
 			};
 			buildConfigurationList = 1A0000062A00000100000001 /* Build configuration list for PBXProject "CodMate" */;
 			compatibilityVersion = "Xcode 15.0";
@@ -415,6 +415,7 @@
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_FILE_ACCESS_DOWNLOADS_FOLDER = readwrite;
+				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
@@ -820,6 +821,7 @@
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_FILE_ACCESS_DOWNLOADS_FOLDER = readwrite;
+				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
@@ -859,6 +861,7 @@
 		5A1A6B002F3A8D1C00A1B001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
@@ -882,6 +885,7 @@
 		5A1A6B012F3A8D1C00A1B001 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
@@ -905,6 +909,7 @@
 		5A44F4A82F3AAAE400AF56A1 /* Debug-Direct */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
@@ -928,6 +933,7 @@
 		5A44F4A92F3AAAE400AF56A1 /* Release-Direct */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
@@ -951,6 +957,7 @@
 		5A44F4AA2F3AAAE400AF56A1 /* Debug-MAS */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
@@ -974,6 +981,7 @@
 		5A44F4AB2F3AAAE400AF56A1 /* Release-MAS */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;

@@ -899,7 +899,9 @@ struct ContentView: View {
   func openPreferredExternal(for session: SessionSummary, using source: SessionSource? = nil) {
     let target = source.map { session.overridingSource($0) } ?? session
     let app = viewModel.preferences.defaultResumeExternalApp
-    viewModel.copyResumeCommandsRespectingProject(session: target, destinationApp: app)
+    guard viewModel.copyResumeCommandsRespectingProject(session: target, destinationApp: app) else {
+      return
+    }
     let dir = workingDirectory(for: target)
     switch app {
     case .iterm2:
@@ -1055,7 +1057,8 @@ struct ContentView: View {
       viewModel.openPreferredTerminalViaScheme(
         app: .iterm2, directory: workingDirectory(for: target), command: cmd)
     case .warp:
-      viewModel.copyResumeCommandsRespectingProject(session: target, destinationApp: .warp)
+      guard viewModel.copyResumeCommandsRespectingProject(session: target, destinationApp: .warp)
+      else { return }
       viewModel.openPreferredTerminalViaScheme(
         app: .warp, directory: workingDirectory(for: target))
       Task {

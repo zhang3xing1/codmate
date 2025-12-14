@@ -30,19 +30,41 @@ extension SessionListViewModel {
         )
     }
 
+    private func warpResumeTitle(for session: SessionSummary) -> String? {
+        if let title = session.userTitle, let sanitized = warpSanitizedTitle(from: title) {
+            return sanitized
+        }
+        let defaultScope = warpScopeCandidate(for: session, project: projectForSession(session))
+        let defaultValue = WarpTitleBuilder.newSessionLabel(scope: defaultScope, task: taskTitle(for: session))
+        return resolveWarpTitleInput(defaultValue: defaultValue, forcePrompt: true)
+    }
+
+    private func projectForSession(_ session: SessionSummary) -> Project? {
+        guard let pid = projectIdForSession(session.id) else { return nil }
+        return projects.first(where: { $0.id == pid })
+    }
+
+    @discardableResult
     func copyResumeCommandsRespectingProject(
         session: SessionSummary,
         destinationApp: TerminalApp? = nil
-    ) {
+    ) -> Bool {
+        var warpHint: String? = nil
+        if destinationApp == .warp {
+            guard let hint = warpResumeTitle(for: session) else { return false }
+            warpHint = hint
+        }
+
         if session.source != .codexLocal {
             actions.copyResumeCommands(
                 session: session,
                 executableURL: preferredExecutableURL(for: session.source),
                 options: preferences.resumeOptions,
                 simplifiedForExternal: true,
-                destinationApp: destinationApp
+                destinationApp: destinationApp,
+                titleHint: warpHint
             )
-            return
+            return true
         }
         if let pid = projectIdForSession(session.id),
             let p = projects.first(where: { $0.id == pid }),
@@ -52,15 +74,18 @@ extension SessionListViewModel {
                 session: session, project: p,
                 executableURL: preferredExecutableURL(for: .codexLocal),
                 options: preferences.resumeOptions,
-                destinationApp: destinationApp)
+                destinationApp: destinationApp,
+                titleHint: warpHint)
         } else {
             actions.copyResumeCommands(
                 session: session,
                 executableURL: preferredExecutableURL(for: .codexLocal),
                 options: preferences.resumeOptions,
                 simplifiedForExternal: true,
-                destinationApp: destinationApp)
+                destinationApp: destinationApp,
+                titleHint: warpHint)
         }
+        return true
     }
 
     func openInTerminal(session: SessionSummary) -> Bool {
@@ -392,8 +417,8 @@ extension SessionListViewModel {
         WarpTitleBuilder.newSessionLabel(scope: project.name, task: nil)
     }
 
-    private func resolveWarpTitleInput(defaultValue: String) -> String? {
-        if preferences.promptForWarpTitle {
+    private func resolveWarpTitleInput(defaultValue: String, forcePrompt: Bool = false) -> String? {
+        if preferences.promptForWarpTitle || forcePrompt {
             guard let userInput = WarpTitlePrompt.requestCustomTitle(defaultValue: defaultValue) else {
                 return nil
             }

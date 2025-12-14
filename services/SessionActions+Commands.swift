@@ -697,20 +697,20 @@ extension SessionActions {
     }
 
     func buildWarpResumeCommands(
-        session: SessionSummary, executableURL: URL, options: ResumeOptions
+        session: SessionSummary, executableURL: URL, options: ResumeOptions, titleHint: String? = nil
     ) -> String {
         if session.isRemote, let host = session.remoteHost {
             let sshContext = resolvedSSHContext(for: host)
             let remote = buildRemoteResumeShellCommand(session: session, options: options)
             let cmd = sshInvocation(host: host, remoteCommand: remote, resolvedArguments: sshContext)
-            let lines = [warpTitleCommentLine(session.effectiveTitle), cmd].compactMap { $0 }
+            let lines = [warpTitleCommentLine(titleHint ?? session.effectiveTitle), cmd].compactMap { $0 }
             return lines.joined(separator: "\n") + "\n"
         }
         _ = executableURL
         let execPath = executableName(for: session.source.baseKind)
         let resume = buildResumeCLIInvocation(session: session, executablePath: execPath, options: options)
         var lines: [String] = []
-        if let title = warpTitleCommentLine(session.effectiveTitle) { lines.append(title) }
+        if let title = warpTitleCommentLine(titleHint ?? session.effectiveTitle) { lines.append(title) }
         if session.source.baseKind == .gemini {
             lines.append(contentsOf: embeddedExportLines(for: session.source))
             let envLines = geminiEnvironmentExportLines(
@@ -763,11 +763,13 @@ extension SessionActions {
     func copyResumeCommands(
         session: SessionSummary, executableURL: URL, options: ResumeOptions,
         simplifiedForExternal: Bool = true,
-        destinationApp: TerminalApp? = nil
+        destinationApp: TerminalApp? = nil,
+        titleHint: String? = nil
     ) {
         let commands: String
         if simplifiedForExternal, destinationApp == .warp {
-            commands = buildWarpResumeCommands(session: session, executableURL: executableURL, options: options)
+            commands = buildWarpResumeCommands(
+                session: session, executableURL: executableURL, options: options, titleHint: titleHint)
         } else {
             commands =
                 simplifiedForExternal
@@ -1424,13 +1426,14 @@ extension SessionActions {
     func copyResumeUsingProjectProfileCommands(
         session: SessionSummary, project: Project, executableURL: URL, options: ResumeOptions,
         simplifiedForExternal: Bool = true,
-        destinationApp: TerminalApp? = nil
+        destinationApp: TerminalApp? = nil,
+        titleHint: String? = nil
     ) {
         let commands: String
         if simplifiedForExternal, destinationApp == .warp {
             let invocation = buildResumeUsingProjectProfileCLIInvocation(
                 session: session, project: project, options: options)
-            let title = warpTitleCommentLine(session.effectiveTitle)
+            let title = warpTitleCommentLine(titleHint ?? session.effectiveTitle)
             if session.isRemote, let host = session.remoteHost {
                 let sshContext = resolvedSSHContext(for: host)
                 var exportLines: [String] = [

@@ -59,8 +59,41 @@ actor SessionIndexer {
 
     guard !isRefreshing else {
       logger.debug("Refresh skipped: already in progress for scope=\(String(describing: scope), privacy: .public)")
-      // When a refresh is already running, still try to surface cached data for ALL scope
-      if !forceFilesystemScan, case .all = scope, let cached = try await cachedAllSummariesFromMeta() {
+      guard !forceFilesystemScan else { return [] }
+      // When a refresh is already running, still try to surface cached data for scope
+      if case .all = scope, let cached = try await cachedAllSummariesFromMeta() {
+        return cached
+      }
+      let fallbackRange: (Date, Date)? = {
+        if let dateRange { return dateRange }
+        let cal = Calendar.current
+        switch scope {
+        case .all:
+          return nil
+        case .today:
+          let start = cal.startOfDay(for: Date())
+          guard let end = cal.date(byAdding: .day, value: 1, to: start)?.addingTimeInterval(-1) else { return nil }
+          return (start, end)
+        case .day(let day):
+          let start = cal.startOfDay(for: day)
+          guard let end = cal.date(byAdding: .day, value: 1, to: start)?.addingTimeInterval(-1) else { return nil }
+          return (start, end)
+        case .month(let date):
+          guard
+            let start = cal.date(from: cal.dateComponents([.year, .month], from: date)),
+            let end = cal.date(byAdding: DateComponents(month: 1, second: -1), to: start)
+          else { return nil }
+          return (start, end)
+        }
+      }()
+      let dateColumn = dateDimension == .updated ? "COALESCE(last_updated_at, started_at)" : "started_at"
+      if let cached = try? await sqliteStore.fetchSummaries(
+        kinds: [.codex],
+        includeRemote: false,
+        dateColumn: dateColumn,
+        dateRange: fallbackRange,
+        projectIds: projectIds
+      ), !cached.isEmpty {
         return cached
       }
       return []

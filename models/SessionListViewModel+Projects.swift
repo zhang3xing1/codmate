@@ -381,6 +381,9 @@ extension SessionListViewModel {
 
     @MainActor
     func recomputeProjectCounts() {
+        if selectedDay != nil || !selectedDays.isEmpty {
+            return
+        }
         // Optimize: use visibleProjectCountsForDateScope if it's for current filter state
         // to avoid re-traversing all sessions
         let currentKey = ProjectVisibleKey(

@@ -60,21 +60,33 @@ actor GeminiSessionProvider {
     let logMtime: Date?
   }
 
+  private struct CachedSummariesResult {
+    let summaries: [SessionSummary]
+    let isComplete: Bool
+  }
+
   private func cachedSummaries(
     forHash hash: String,
     files: [ChatFileInfo],
     signature: HashSignature
-  ) async throws -> [SessionSummary] {
+  ) async throws -> CachedSummariesResult {
     guard let cacheStore else { throw SessionProviderCacheError.cacheUnavailable }
-    guard let latest = signature.latestChatMtime else { return [] }
+    guard let latest = signature.latestChatMtime else {
+      return CachedSummariesResult(summaries: [], isComplete: true)
+    }
     var bestById: [String: SessionSummary] = [:]
+    var isComplete = true
     for file in files {
+      let validity = sessionValidity(for: file.url)
+      if validity == .invalid { continue }
       guard let cached = try await cacheStore.fetch(
         path: file.url.path,
         modificationDate: latest,
         fileSize: signature.chatsTotalSize
-      ) else { continue }
-      if sessionValidity(for: file.url) == .invalid { continue }
+      ) else {
+        isComplete = false
+        continue
+      }
       let summary = cached.overridingSource(.geminiLocal)
       canonicalURLById[summary.id] = file.url
       if let existing = bestById[summary.id] {
@@ -83,7 +95,7 @@ actor GeminiSessionProvider {
         bestById[summary.id] = summary
       }
     }
-    return Array(bestById.values)
+    return CachedSummariesResult(summaries: Array(bestById.values), isComplete: isComplete)
   }
 
   private enum GeminiSessionValidity {
@@ -175,9 +187,11 @@ actor GeminiSessionProvider {
           files: fileInfo.files,
           signature: fileInfo.signature
         )
-        if !cached.isEmpty {
-          for summary in cached where matches(scope: scope, summary: summary) {
-            summaries.append(summary)
+        if cached.isComplete {
+          if !cached.summaries.isEmpty {
+            for summary in cached.summaries where matches(scope: scope, summary: summary) {
+              summaries.append(summary)
+            }
           }
           continue
         }
@@ -746,7 +760,8 @@ extension GeminiSessionProvider: SessionProvider {
           projectIds: context.projectIds
         )
         if !cached.isEmpty {
-          return SessionProviderResult(summaries: cached, coverage: nil, cacheHit: true)
+          let filtered = cached.filter { sessionValidity(for: $0.fileURL) != .invalid }
+          return SessionProviderResult(summaries: filtered, coverage: nil, cacheHit: true)
         }
       }
       return SessionProviderResult(summaries: [], coverage: nil, cacheHit: true)

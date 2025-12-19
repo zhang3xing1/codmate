@@ -745,14 +745,17 @@ final class SessionListViewModel: ObservableObject {
 
     let providers = buildProviders(enabledRemoteHosts: Set(enabledRemoteHosts))
     let projectDirectories = singleSelectedProjectDirectory()
+    let scopedProjectIds = dateDimension == .created ? singleSelectedProject() : nil
+    let scopedProjectDirectories = dateDimension == .created ? projectDirectories : nil
+    let scopedDateRange = dateDimension == .created ? currentDateRange() : nil
     let cacheContext = SessionProviderContext(
       scope: scope,
       sessionsRoot: preferences.sessionsRoot,
       enabledRemoteHosts: Set(enabledRemoteHosts),
-      projectDirectories: projectDirectories,
+      projectDirectories: scopedProjectDirectories,
       dateDimension: dateDimension,
-      dateRange: currentDateRange(),
-      projectIds: singleSelectedProject(),
+      dateRange: scopedDateRange,
+      projectIds: scopedProjectIds,
       forceFilesystemScan: false,
       cachePolicy: .cacheOnly
     )
@@ -760,23 +763,32 @@ final class SessionListViewModel: ObservableObject {
       scope: scope,
       sessionsRoot: preferences.sessionsRoot,
       enabledRemoteHosts: Set(enabledRemoteHosts),
-      projectDirectories: projectDirectories,
+      projectDirectories: scopedProjectDirectories,
       dateDimension: dateDimension,
-      dateRange: currentDateRange(),
-      projectIds: singleSelectedProject(),
+      dateRange: scopedDateRange,
+      projectIds: scopedProjectIds,
       forceFilesystemScan: force,
       cachePolicy: .refresh
     )
 
     let cachedResults = await loadProviders(providers, context: cacheContext)
-    var sessions = dedupProviderSessions(cachedResults)
+    let cachedSessions = dedupProviderSessions(cachedResults)
+    let notes = await notesStore.all()
+    notesSnapshot = notes
+
+    if token == activeRefreshToken, !cachedSessions.isEmpty {
+      var cachedForApply = cachedSessions
+      apply(notes: notes, to: &cachedForApply)
+      registerActivityHeartbeat(previous: allSessions, current: cachedForApply)
+      smartMergeAllSessions(newSessions: cachedForApply)
+      scheduleFiltersUpdate()
+    }
+
     let refreshedResults = await loadProviders(providers, context: refreshContext)
-    sessions = dedupProviderSessions(sessions + refreshedResults)
+    var sessions = dedupProviderSessions(cachedSessions + refreshedResults)
 
     guard token == activeRefreshToken else { return }
     let previousIDs = Set(allSessions.map { $0.id })
-    let notes = await notesStore.all()
-    notesSnapshot = notes
     // Refresh projects/memberships snapshot and import legacy mappings if needed
     Task { @MainActor in
       await self.loadProjects()
@@ -1668,9 +1680,10 @@ final class SessionListViewModel: ObservableObject {
       selectedDay: selectedDay, selectedDays: selectedDays, monthStart: sidebarMonthStart)
     // Update UI using next-runloop to avoid publishing during view updates
     scheduleApplyFilters()
-    // After coordinated update of selectedDay/selectedDays, trigger a refresh once.
-    // Use force=true to ensure scope reload
-    scheduleFilterRefresh(force: true)
+    // After coordinated update of selectedDay/selectedDays, trigger a refresh only in Created mode.
+    if dateDimension == .created {
+      scheduleFilterRefresh(force: true)
+    }
   }
 
   // Toggle selection for a specific day (Cmd-click behavior)
@@ -1697,7 +1710,9 @@ final class SessionListViewModel: ObservableObject {
       selectedDay: selectedDay, selectedDays: selectedDays, monthStart: sidebarMonthStart)
     // Update UI using next-runloop to avoid publishing during view updates
     scheduleApplyFilters()
-    scheduleFilterRefresh(force: true)
+    if dateDimension == .created {
+      scheduleFilterRefresh(force: true)
+    }
   }
 
   func clearAllFilters() {
@@ -1744,6 +1759,7 @@ final class SessionListViewModel: ObservableObject {
   }
 
   private func shouldRefreshForSelection() -> Bool {
+    guard dateDimension == .created else { return false }
     let projectIsSingle = selectedProjectIDs.count == 1
     let calendarIsSingle = (selectedDay != nil) || selectedDays.count == 1
     return projectIsSingle || calendarIsSingle
@@ -2694,7 +2710,9 @@ final class SessionListViewModel: ObservableObject {
     pendingScopeRefreshForce[key] = (pendingScopeRefreshForce[key] ?? false) || force
 
     if force {
-      sections = []
+      if allSessions.isEmpty {
+        sections = []
+      }
       isLoading = true
     }
 

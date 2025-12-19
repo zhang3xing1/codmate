@@ -306,15 +306,7 @@ private final class CodexRPCClient: @unchecked Sendable {
 
   private static func buildEnvironment() -> [String: String] {
     var env = ProcessInfo.processInfo.environment
-    let home = FileManager.default.homeDirectoryForCurrentUser.path
-    let base = [
-      "/opt/homebrew/bin",
-      "/usr/local/bin",
-      "/usr/bin",
-      "/bin",
-      "\(home)/.local/bin",
-      "\(home)/.bun/bin",
-    ].joined(separator: ":")
+    let base = CLIEnvironment.buildBasePATH()
     if let current = env["PATH"], !current.isEmpty {
       env["PATH"] = base + ":" + current
     } else {

@@ -20,13 +20,27 @@ final class SessionPreferencesStore: ObservableObject {
     didSet { persist() }
   }
 
+  @Published var codexCommandPath: String {
+    didSet { persistCLIPaths() }
+  }
+
+  @Published var claudeCommandPath: String {
+    didSet { persistCLIPaths() }
+  }
+
+  @Published var geminiCommandPath: String {
+    didSet { persistCLIPaths() }
+  }
+
   private let defaults: UserDefaults
   private let fileManager: FileManager
   private struct Keys {
     static let sessionsRootPath = "codex.sessions.rootPath"
     static let notesRootPath = "codex.notes.rootPath"
     static let projectsRootPath = "codmate.projects.rootPath"
-    // Removed: CLI executable paths; rely on PATH resolution
+    static let codexCommandPath = "codmate.command.codex"
+    static let claudeCommandPath = "codmate.command.claude"
+    static let geminiCommandPath = "codmate.command.gemini"
     static let resumeUseEmbedded = "codex.resume.useEmbedded"
     static let resumeCopyClipboard = "codex.resume.copyClipboard"
     static let resumeExternalApp = "codex.resume.externalApp"
@@ -114,10 +128,17 @@ final class SessionPreferencesStore: ObservableObject {
       return SessionPreferencesStore.defaultProjectsRoot(for: homeURL)
     }()
 
+    let storedCodexCommandPath = defaults.string(forKey: Keys.codexCommandPath) ?? ""
+    let storedClaudeCommandPath = defaults.string(forKey: Keys.claudeCommandPath) ?? ""
+    let storedGeminiCommandPath = defaults.string(forKey: Keys.geminiCommandPath) ?? ""
+
     // Assign after all are computed to avoid using self before init completes
     self.sessionsRoot = resolvedSessionsRoot
     self.notesRoot = resolvedNotesRoot
     self.projectsRoot = resolvedProjectsRoot
+    self.codexCommandPath = storedCodexCommandPath
+    self.claudeCommandPath = storedClaudeCommandPath
+    self.geminiCommandPath = storedGeminiCommandPath
     // Resume defaults (defer assigning to self until value is finalized)
     let resumeEmbedded: Bool
     #if APPSTORE
@@ -137,7 +158,12 @@ final class SessionPreferencesStore: ObservableObject {
     self.defaultResumeCopyToClipboard =
       defaults.object(forKey: Keys.resumeCopyClipboard) as? Bool ?? true
     let appRaw = defaults.string(forKey: Keys.resumeExternalApp) ?? TerminalApp.terminal.rawValue
-    self.defaultResumeExternalApp = TerminalApp(rawValue: appRaw) ?? .terminal
+    var resumeApp = TerminalApp(rawValue: appRaw) ?? .terminal
+    let installedApps = TerminalApp.availableExternalAppsIncludingNone
+    if !installedApps.contains(resumeApp) {
+      resumeApp = .terminal
+    }
+    self.defaultResumeExternalApp = resumeApp
 
     // Default editor for quick open (files)
     let editorRaw = defaults.string(forKey: Keys.defaultFileEditor) ?? EditorApp.vscode.rawValue
@@ -263,6 +289,21 @@ final class SessionPreferencesStore: ObservableObject {
     defaults.set(projectsRoot.path, forKey: Keys.projectsRootPath)
     }
 
+    private func persistCLIPaths() {
+        setOptionalPath(codexCommandPath, key: Keys.codexCommandPath)
+        setOptionalPath(claudeCommandPath, key: Keys.claudeCommandPath)
+        setOptionalPath(geminiCommandPath, key: Keys.geminiCommandPath)
+    }
+
+    private func setOptionalPath(_ value: String, key: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            defaults.removeObject(forKey: key)
+        } else {
+            defaults.set(trimmed, forKey: key)
+        }
+    }
+
     private func ensureDirectoryExists(_ url: URL) {
         var isDir: ObjCBool = false
         if fileManager.fileExists(atPath: url.path, isDirectory: &isDir) {
@@ -300,6 +341,21 @@ final class SessionPreferencesStore: ObservableObject {
       .appendingPathComponent("projects", isDirectory: true)
   }
 
+  func resolvedCommandOverrideURL(for kind: SessionSource.Kind) -> URL? {
+    let raw: String
+    switch kind {
+    case .codex: raw = codexCommandPath
+    case .claude: raw = claudeCommandPath
+    case .gemini: raw = geminiCommandPath
+    }
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let expanded = expandHomePath(trimmed)
+    guard expanded.contains("/") else { return nil }
+    let url = URL(fileURLWithPath: expanded)
+    return fileManager.isExecutableFile(atPath: url.path) ? url : nil
+  }
+
   /// Get the real user home directory (not sandbox container)
   nonisolated static func getRealUserHomeURL() -> URL {
     #if canImport(Darwin)
@@ -312,6 +368,16 @@ final class SessionPreferencesStore: ObservableObject {
       return URL(fileURLWithPath: home, isDirectory: true)
     }
     return FileManager.default.homeDirectoryForCurrentUser
+  }
+
+  private func expandHomePath(_ path: String) -> String {
+    if path.hasPrefix("~") {
+      return (path as NSString).expandingTildeInPath
+    }
+    if path.contains("$HOME") {
+      return path.replacingOccurrences(of: "$HOME", with: NSHomeDirectory())
+    }
+    return path
   }
 
   // Removed: default executable URLs – resolution uses PATH

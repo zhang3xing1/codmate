@@ -705,11 +705,19 @@ struct ContentView: View {
     if SecurityScopedBookmarks.shared.isSandboxed {
       return nil
     }
-    let exe = session.source.baseKind.cliExecutableName
+    let overrideURL = preferences.resolvedCommandOverrideURL(for: session.source.baseKind)
+    let exe = overrideURL?.path ?? session.source.baseKind.cliExecutableName
     #if canImport(SwiftTerm)
-      guard TerminalSessionManager.executableExists(exe) else {
-        NSLog("⚠️ [ContentView] CLI executable %@ not found on PATH; falling back to shell", exe)
-        return nil
+      if let overrideURL {
+        guard FileManager.default.isExecutableFile(atPath: overrideURL.path) else {
+          NSLog("⚠️ [ContentView] CLI override %@ not executable; falling back to shell", overrideURL.path)
+          return nil
+        }
+      } else {
+        guard TerminalSessionManager.executableExists(exe) else {
+          NSLog("⚠️ [ContentView] CLI executable %@ not found on PATH; falling back to shell", exe)
+          return nil
+        }
       }
     #endif
     let args = viewModel.buildResumeCLIArgs(session: session)
@@ -735,13 +743,23 @@ struct ContentView: View {
     // Minimal viable: start a login-less shell is not desired; instead start a no-op codex to present UI quickly.
     // As a preview, run `codex` without args in the project directory if we can infer it.
     if let pending = pendingEmbeddedRekeys.first(where: { $0.anchorId == anchorId }) {
-      let exe = "codex"
+      let overrideURL = preferences.resolvedCommandOverrideURL(for: .codex)
+      let exe = overrideURL?.path ?? "codex"
       #if canImport(SwiftTerm)
-        guard TerminalSessionManager.executableExists(exe) else {
-          NSLog(
-            "⚠️ [ContentView] CLI executable %@ not found on PATH for anchor %@; falling back to shell",
-            exe, anchorId)
-          return nil
+        if let overrideURL {
+          guard FileManager.default.isExecutableFile(atPath: overrideURL.path) else {
+            NSLog(
+              "⚠️ [ContentView] CLI override %@ not executable for anchor %@; falling back to shell",
+              overrideURL.path, anchorId)
+            return nil
+          }
+        } else {
+          guard TerminalSessionManager.executableExists(exe) else {
+            NSLog(
+              "⚠️ [ContentView] CLI executable %@ not found on PATH for anchor %@; falling back to shell",
+              exe, anchorId)
+            return nil
+          }
         }
       #endif
       let args: [String] = []

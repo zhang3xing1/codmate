@@ -24,10 +24,11 @@ import Foundation
 
         let zshenvURL = zdotdir.appendingPathComponent(".zshenv", isDirectory: false)
         // Always overwrite to ensure latest paths (like .bun) are available
+        let injectedPATH = CLIEnvironment.buildInjectedPATH()
         let content = """
           # CodMate App Store sandbox bootstrap
-          # Ensure Homebrew and system paths are available to embedded zsh
-          export PATH="$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+          # Ensure common CLI paths are available to embedded zsh
+          export PATH="\(injectedPATH)"
           export LANG="${LANG:-zh_CN.UTF-8}"
           export LC_ALL="${LC_ALL:-zh_CN.UTF-8}"
           export LC_CTYPE="${LC_CTYPE:-zh_CN.UTF-8}"
@@ -63,7 +64,7 @@ import Foundation
   @MainActor
   final class TerminalSessionManager {
     static let shared = TerminalSessionManager()
-    static let standardExecutablePrefix = "$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    static let standardExecutablePrefix = CLIEnvironment.buildBasePATH()
     // Keyed by terminalKey (not session id). Allows multiple panes per session.
     private var views: [String: LocalProcessTerminalView] = [:]
     private var bootstrapped: Set<String> = []

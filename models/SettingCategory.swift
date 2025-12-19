@@ -10,14 +10,14 @@ enum SettingCategory: String, CaseIterable, Identifiable {
   case remoteHosts
   case gitReview
   case claudeCode
-  case dialectics
+  case advanced
   case mcpServer
   case about
 
   // Customize displayed order and allow hiding categories without breaking enums elsewhere.
   // Remote Hosts appears as a top-level settings page alongside Codex.
   static var allCases: [SettingCategory] {
-    [.general, .terminal, .providers, .gitReview, .mcpServer, .remoteHosts, .codex, .gemini, .claudeCode, .dialectics, .about]
+    [.general, .terminal, .providers, .gitReview, .mcpServer, .remoteHosts, .codex, .gemini, .claudeCode, .advanced, .about]
   }
 
   var id: String { rawValue }
@@ -33,7 +33,7 @@ enum SettingCategory: String, CaseIterable, Identifiable {
     case .remoteHosts: return "Remote Hosts"
     case .gitReview: return "Git Review"
     case .claudeCode: return "Claude Code"
-    case .dialectics: return "Dialectics"
+    case .advanced: return "Advanced"
     case .mcpServer: return "MCP Server"
     case .about: return "About"
     }
@@ -48,7 +48,7 @@ enum SettingCategory: String, CaseIterable, Identifiable {
     case .codex: return "sparkles"
     case .gemini: return "sparkles.rectangle.stack"
     case .remoteHosts: return "antenna.radiowaves.left.and.right"
-    case .dialectics: return "doc.text.magnifyingglass"
+    case .advanced: return "gearshape.2"
     case .gitReview: return "square.and.pencil"
     case .claudeCode: return "chevron.left.slash.chevron.right"
     case .mcpServer: return "server.rack"
@@ -67,7 +67,7 @@ enum SettingCategory: String, CaseIterable, Identifiable {
     case .remoteHosts: return "Remote SSH host configuration"
     case .gitReview: return "Git changes viewer and commit generation"
     case .claudeCode: return "Claude Code configuration"
-    case .dialectics: return "Deep diagnostics & reports"
+    case .advanced: return "Paths and deep diagnostics"
     case .mcpServer: return "Manage Codex MCP integrations"
     case .about: return "App info and project links"
   }

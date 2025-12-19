@@ -12,9 +12,11 @@ extension SessionActions {
     ) async throws
         -> ProcessResult
     {
-        // Always invoke via /usr/bin/env to rely on system PATH resolution.
-        // This removes the need for user-configured CLI paths and aligns with app policy.
-        let exeName = executableName(for: session.source.baseKind)
+        // Prefer PATH resolution; allow an optional user-specified executable override when valid.
+        let resolvedExec = resolvedExecutablePath(
+            for: session.source.baseKind,
+            executableURL: executableURL
+        )
 
         // Prepare arguments first, including async MCP config if needed
         var additionalEnv: [String: String] = [:]
@@ -65,9 +67,14 @@ extension SessionActions {
             Task.detached {
                 do {
                     let process = Process()
-                    // Use env to resolve the executable on PATH
-                    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                    process.arguments = [exeName] + args
+                    if resolvedExec == session.source.baseKind.cliExecutableName {
+                        // Use env to resolve the executable on PATH
+                        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                        process.arguments = [resolvedExec] + args
+                    } else {
+                        process.executableURL = URL(fileURLWithPath: resolvedExec)
+                        process.arguments = args
+                    }
                     // Prefer original session cwd if exists
                     process.currentDirectoryURL = cwdURL
 
@@ -192,6 +199,14 @@ extension SessionActions {
 
     private func executableName(for kind: SessionSource.Kind) -> String {
         kind.cliExecutableName
+    }
+
+    func resolvedExecutablePath(for kind: SessionSource.Kind, executableURL: URL) -> String {
+        let candidate = executableURL.path
+        if candidate != "/usr/bin/env", fileManager.isExecutableFile(atPath: candidate) {
+            return candidate
+        }
+        return kind.cliExecutableName
     }
 
     private func embeddedExportLines(for source: SessionSource) -> [String] { [] }
@@ -353,7 +368,10 @@ extension SessionActions {
     }
 
     func buildNewSessionCLIInvocation(
-        session: SessionSummary, options: ResumeOptions, initialPrompt: String? = nil
+        session: SessionSummary,
+        options: ResumeOptions,
+        initialPrompt: String? = nil,
+        executablePath: String? = nil
     ) -> String {
         // Check if this is a remote session and return SSH command if so
         if session.isRemote, let host = session.remoteHost {
@@ -371,17 +389,25 @@ extension SessionActions {
         }
         
         // Local session handling
-        return buildLocalNewSessionCLIInvocation(session: session, options: options, initialPrompt: initialPrompt)
+        return buildLocalNewSessionCLIInvocation(
+            session: session,
+            options: options,
+            initialPrompt: initialPrompt,
+            executablePath: executablePath
+        )
     }
 
     func buildLocalNewSessionCLIInvocation(
-        session: SessionSummary, options: ResumeOptions, initialPrompt: String? = nil
+        session: SessionSummary,
+        options: ResumeOptions,
+        initialPrompt: String? = nil,
+        executablePath: String? = nil
     ) -> String {
         // Local session handling (without checking remote status)
         switch session.source.baseKind {
         case .codex:
             // Launch a fresh Codex session by invoking `codex` directly (no "new" subcommand).
-            let exe = "codex"
+            let exe = shellQuoteIfNeeded(executablePath ?? "codex")
             var parts: [String] = [exe]
             let args = buildNewSessionArguments(session: session, options: options).map {
                 arg -> String in
@@ -396,7 +422,7 @@ extension SessionActions {
             }
             return parts.joined(separator: " ")
         case .claude:
-            var parts: [String] = ["claude"]
+            var parts: [String] = [shellQuoteIfNeeded(executablePath ?? "claude")]
 
             // Apply model if specified
             // For Built-in provider: either omit --model or use short alias (sonnet/haiku/opus)
@@ -470,7 +496,7 @@ extension SessionActions {
             }
             return parts.joined(separator: " ")
         case .gemini:
-            let exe = "gemini"
+            let exe = shellQuoteIfNeeded(executablePath ?? "gemini")
             var parts: [String] = [exe]
             let args = buildNewSessionArguments(session: session, options: options).map {
                 arg -> String in
@@ -538,8 +564,11 @@ extension SessionActions {
         }
         let exports = exportLines.joined(separator: "; ")
         let injectedPATH = CLIEnvironment.buildInjectedPATH()
-        // Use bare executable name for embedded terminal to respect user's PATH resolution
-        let execPath = executableName(for: session.source.baseKind)
+        // Use override executable when configured; otherwise fall back to PATH resolution.
+        let execPath = resolvedExecutablePath(
+            for: session.source.baseKind,
+            executableURL: executableURL
+        )
         let invocation = buildResumeCLIInvocation(
             session: session, executablePath: execPath, options: options)
         let resume = "PATH=\(injectedPATH) \(invocation)"
@@ -550,7 +579,6 @@ extension SessionActions {
     func buildNewSessionCommandLines(
         session: SessionSummary, executableURL: URL, options: ResumeOptions
     ) -> String {
-        _ = executableURL  // retained for API symmetry; PATH handles resolution
         #if APPSTORE
         let cwd =
             FileManager.default.fileExists(atPath: session.cwd)
@@ -585,7 +613,12 @@ extension SessionActions {
             exportLines.append(contentsOf: envLines)
         }
         let exports = exportLines.isEmpty ? nil : exportLines.joined(separator: "; ")
-        let invocation = buildNewSessionCLIInvocation(session: session, options: options)
+        let execPath = resolvedExecutablePath(
+            for: session.source.baseKind,
+            executableURL: executableURL
+        )
+        let invocation = buildNewSessionCLIInvocation(
+            session: session, options: options, executablePath: execPath)
         var lines = [cd]
         if let exports { lines.append(exports) }
         lines.append(invocation)
@@ -596,7 +629,6 @@ extension SessionActions {
     func buildExternalNewSessionCommands(
         session: SessionSummary, executableURL: URL, options: ResumeOptions
     ) -> String {
-        _ = executableURL
         if session.isRemote, let host = session.remoteHost {
             let sshContext = resolvedSSHContext(for: host)
             let remote = buildRemoteNewShellCommand(
@@ -614,7 +646,12 @@ extension SessionActions {
             FileManager.default.fileExists(atPath: session.cwd)
             ? session.cwd : session.fileURL.deletingLastPathComponent().path
         let cd = "cd " + shellEscapedPath(cwd)
-        let newCommand = buildNewSessionCLIInvocation(session: session, options: options)
+        let execPath = resolvedExecutablePath(
+            for: session.source.baseKind,
+            executableURL: executableURL
+        )
+        let newCommand = buildNewSessionCLIInvocation(
+            session: session, options: options, executablePath: execPath)
         var lines = [cd]
         if session.source.baseKind == .gemini {
             lines.append(contentsOf: embeddedExportLines(for: session.source))
@@ -647,7 +684,10 @@ extension SessionActions {
         }
         let cwd = self.workingDirectory(for: session, override: workingDirectory)
         let cd = "cd " + shellEscapedPath(cwd)
-        let execPath = executableName(for: session.source.baseKind)
+        let execPath = resolvedExecutablePath(
+            for: session.source.baseKind,
+            executableURL: executableURL
+        )
         let resume = buildResumeCLIInvocation(
             session: session, executablePath: execPath, options: options)
         var lines = [cd]
@@ -706,8 +746,10 @@ extension SessionActions {
             let lines = [warpTitleCommentLine(titleHint ?? session.effectiveTitle), cmd].compactMap { $0 }
             return lines.joined(separator: "\n") + "\n"
         }
-        _ = executableURL
-        let execPath = executableName(for: session.source.baseKind)
+        let execPath = resolvedExecutablePath(
+            for: session.source.baseKind,
+            executableURL: executableURL
+        )
         let resume = buildResumeCLIInvocation(session: session, executablePath: execPath, options: options)
         var lines: [String] = []
         if let title = warpTitleCommentLine(titleHint ?? session.effectiveTitle) { lines.append(title) }
@@ -742,12 +784,16 @@ extension SessionActions {
             let lines = [title, cmd].compactMap { $0 }
             return lines.joined(separator: "\n") + "\n"
         }
-        _ = executableURL
+        let execPath = resolvedExecutablePath(
+            for: session.source.baseKind,
+            executableURL: executableURL
+        )
         let base = titleHint ?? WarpTitleBuilder.newSessionLabel(
             scope: warpScope(from: session),
             task: nil
         )
-        let newCommand = buildNewSessionCLIInvocation(session: session, options: options)
+        let newCommand = buildNewSessionCLIInvocation(
+            session: session, options: options, executablePath: execPath)
         var lines: [String] = []
         if let title = warpTitleCommentLine(base) { lines.append(title) }
         if session.source.baseKind == .gemini {
@@ -796,7 +842,6 @@ extension SessionActions {
         destinationApp: TerminalApp? = nil,
         titleHint: String? = nil
     ) {
-        _ = executableURL
         let commands: String
         if simplifiedForExternal, destinationApp == .warp {
             commands = buildWarpNewSessionCommands(
@@ -871,8 +916,12 @@ extension SessionActions {
         return args
     }
 
-    func buildNewProjectCLIInvocation(project: Project, options: ResumeOptions) -> String {
-        let exe = "codex"
+    func buildNewProjectCLIInvocation(
+        project: Project,
+        options: ResumeOptions,
+        executablePath: String? = nil
+    ) -> String {
+        let exe = shellQuoteIfNeeded(executablePath ?? "codex")
         let args = buildNewProjectArguments(project: project, options: options).map {
             arg -> String in
             if arg.contains(where: { $0.isWhitespace || $0 == "'" }) {
@@ -887,7 +936,6 @@ extension SessionActions {
     func buildNewProjectCommandLines(project: Project, executableURL: URL, options: ResumeOptions)
         -> String
     {
-        _ = executableURL
         let cdLine: String? = {
             if let dir = project.directory,
                 !dir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -920,7 +968,9 @@ extension SessionActions {
             }
         }
         let exports = exportLines.joined(separator: "; ")
-        let invocation = buildNewProjectCLIInvocation(project: project, options: options)
+        let execPath = resolvedExecutablePath(for: .codex, executableURL: executableURL)
+        let invocation = buildNewProjectCLIInvocation(
+            project: project, options: options, executablePath: execPath)
         let command = "PATH=\(injectedPATH) \(invocation)"
         if let cd = cdLine {
             return cd + "\n" + exports + "\n" + command + "\n"
@@ -932,7 +982,6 @@ extension SessionActions {
     func buildExternalNewProjectCommands(
         project: Project, executableURL: URL, options: ResumeOptions
     ) -> String {
-        _ = executableURL
         let cdLine: String? = {
             if let dir = project.directory,
                 !dir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -941,7 +990,9 @@ extension SessionActions {
             }
             return nil
         }()
-        let cmd = buildNewProjectCLIInvocation(project: project, options: options)
+        let execPath = resolvedExecutablePath(for: .codex, executableURL: executableURL)
+        let cmd = buildNewProjectCLIInvocation(
+            project: project, options: options, executablePath: execPath)
         if let cd = cdLine {
             // Standard external New Session: emit `cd` + bare CLI invocation only.
             return cd + "\n" + cmd + "\n"
@@ -963,7 +1014,9 @@ extension SessionActions {
                 task: nil
             )
             let title = warpTitleCommentLine(base)
-            let cmd = buildNewProjectCLIInvocation(project: project, options: options)
+            let execPath = resolvedExecutablePath(for: .codex, executableURL: executableURL)
+            let cmd = buildNewProjectCLIInvocation(
+                project: project, options: options, executablePath: execPath)
             let lines = [title, cmd].compactMap { $0 }
             commands = lines.joined(separator: "\n") + "\n"
         } else {
@@ -1059,11 +1112,14 @@ extension SessionActions {
     }
 
     func buildNewSessionUsingProjectProfileCLIInvocation(
-        session: SessionSummary, project: Project, options: ResumeOptions,
-        initialPrompt: String? = nil
+        session: SessionSummary,
+        project: Project,
+        options: ResumeOptions,
+        initialPrompt: String? = nil,
+        executablePath: String? = nil
     ) -> String {
         // Launch using project profile; choose executable based on session source.
-        let exe = executableName(for: session.source.baseKind)
+        let exe = shellQuoteIfNeeded(executablePath ?? executableName(for: session.source.baseKind))
         var parts: [String] = [exe]
 
         // For Claude, only include model if specified; profile settings don't apply.
@@ -1104,10 +1160,9 @@ extension SessionActions {
         session: SessionSummary, project: Project, executableURL: URL, options: ResumeOptions,
         initialPrompt: String? = nil
     ) -> String {
-        _ = executableURL
-        let invocation = buildNewSessionUsingProjectProfileCLIInvocation(
-            session: session, project: project, options: options, initialPrompt: initialPrompt)
         if session.isRemote, let host = session.remoteHost {
+            let invocation = buildNewSessionUsingProjectProfileCLIInvocation(
+                session: session, project: project, options: options, initialPrompt: initialPrompt)
             var exportLines: [String] = [
                 "export LANG=zh_CN.UTF-8",
                 "export LC_ALL=zh_CN.UTF-8",
@@ -1137,6 +1192,17 @@ extension SessionActions {
             FileManager.default.fileExists(atPath: session.cwd)
             ? session.cwd : session.fileURL.deletingLastPathComponent().path
         let cd = "cd " + shellEscapedPath(cwd)
+        let execPath = resolvedExecutablePath(
+            for: session.source.baseKind,
+            executableURL: executableURL
+        )
+        let invocation = buildNewSessionUsingProjectProfileCLIInvocation(
+            session: session,
+            project: project,
+            options: options,
+            initialPrompt: initialPrompt,
+            executablePath: execPath
+        )
         // Local project-profile New: only emit `cd` + bare CLI invocation.
         return cd + "\n" + invocation + "\n"
     }
@@ -1145,7 +1211,6 @@ extension SessionActions {
         session: SessionSummary, project: Project, executableURL: URL, options: ResumeOptions,
         initialPrompt: String? = nil
     ) -> String {
-        _ = executableURL
         if session.isRemote, let host = session.remoteHost {
             let sshContext = resolvedSSHContext(for: host)
             var exportLines: [String] = [
@@ -1179,7 +1244,15 @@ extension SessionActions {
             ? session.cwd : session.fileURL.deletingLastPathComponent().path
         let cd = "cd " + shellEscapedPath(cwd)
         let cmd = buildNewSessionUsingProjectProfileCLIInvocation(
-            session: session, project: project, options: options, initialPrompt: initialPrompt)
+            session: session,
+            project: project,
+            options: options,
+            initialPrompt: initialPrompt,
+            executablePath: resolvedExecutablePath(
+                for: session.source.baseKind,
+                executableURL: executableURL
+            )
+        )
         return cd + "\n" + cmd + "\n"
     }
 
@@ -1192,8 +1265,23 @@ extension SessionActions {
     ) {
         let commands: String
         if simplifiedForExternal, destinationApp == .warp {
-            let invocation = buildNewSessionUsingProjectProfileCLIInvocation(
-                session: session, project: project, options: options, initialPrompt: initialPrompt)
+            let invocation: String
+            if session.isRemote {
+                invocation = buildNewSessionUsingProjectProfileCLIInvocation(
+                    session: session, project: project, options: options, initialPrompt: initialPrompt)
+            } else {
+                let execPath = resolvedExecutablePath(
+                    for: session.source.baseKind,
+                    executableURL: executableURL
+                )
+                invocation = buildNewSessionUsingProjectProfileCLIInvocation(
+                    session: session,
+                    project: project,
+                    options: options,
+                    initialPrompt: initialPrompt,
+                    executablePath: execPath
+                )
+            }
             let extraHost = session.isRemote ? session.remoteHost : nil
             let base = titleHint ?? WarpTitleBuilder.newSessionLabel(
                 scope: project.name,
@@ -1351,7 +1439,6 @@ extension SessionActions {
     func buildResumeUsingProjectProfileCommandLines(
         session: SessionSummary, project: Project, executableURL: URL, options: ResumeOptions
     ) -> String {
-        _ = executableURL
         var exportLines: [String] = [
             "export LANG=zh_CN.UTF-8",
             "export LC_ALL=zh_CN.UTF-8",
@@ -1365,9 +1452,9 @@ extension SessionActions {
                 exportLines.append("export \(key)=\(shellSingleQuoted(v))")
             }
         }
-        let invocation = buildResumeUsingProjectProfileCLIInvocation(
-            session: session, project: project, options: options)
         if session.isRemote, let host = session.remoteHost {
+            let invocation = buildResumeUsingProjectProfileCLIInvocation(
+                session: session, project: project, options: options)
             let sshContext = resolvedSSHContext(for: host)
             let remote = buildRemoteShellCommand(
                 session: session,
@@ -1385,14 +1472,22 @@ extension SessionActions {
             ? session.cwd : session.fileURL.deletingLastPathComponent().path
         let cd = "cd " + shellEscapedPath(cwd)
         let exports = exportLines.joined(separator: "; ")
-        let command = invocation
+        let execPath = resolvedExecutablePath(
+            for: session.source.baseKind,
+            executableURL: executableURL
+        )
+        let command = buildResumeUsingProjectProfileCLIInvocation(
+            session: session,
+            project: project,
+            executablePath: execPath,
+            options: options
+        )
         return cd + "\n" + exports + "\n" + command + "\n"
     }
 
     func buildExternalResumeUsingProjectProfileCommands(
         session: SessionSummary, project: Project, executableURL: URL, options: ResumeOptions
     ) -> String {
-        _ = executableURL
         if session.isRemote, let host = session.remoteHost {
             let sshContext = resolvedSSHContext(for: host)
             var exportLines: [String] = [
@@ -1425,8 +1520,12 @@ extension SessionActions {
             FileManager.default.fileExists(atPath: session.cwd)
             ? session.cwd : session.fileURL.deletingLastPathComponent().path
         let cd = "cd " + shellEscapedPath(cwd)
+        let execPath = resolvedExecutablePath(
+            for: session.source.baseKind,
+            executableURL: executableURL
+        )
         let cmd = buildResumeUsingProjectProfileCLIInvocation(
-            session: session, project: project, options: options)
+            session: session, project: project, executablePath: execPath, options: options)
         return cd + "\n" + cmd + "\n"
     }
 
@@ -1438,8 +1537,22 @@ extension SessionActions {
     ) {
         let commands: String
         if simplifiedForExternal, destinationApp == .warp {
-            let invocation = buildResumeUsingProjectProfileCLIInvocation(
-                session: session, project: project, options: options)
+            let invocation: String
+            if session.isRemote {
+                invocation = buildResumeUsingProjectProfileCLIInvocation(
+                    session: session, project: project, options: options)
+            } else {
+                let execPath = resolvedExecutablePath(
+                    for: session.source.baseKind,
+                    executableURL: executableURL
+                )
+                invocation = buildResumeUsingProjectProfileCLIInvocation(
+                    session: session,
+                    project: project,
+                    executablePath: execPath,
+                    options: options
+                )
+            }
             let title = warpTitleCommentLine(titleHint ?? session.effectiveTitle)
             if session.isRemote, let host = session.remoteHost {
                 let sshContext = resolvedSSHContext(for: host)
@@ -1527,7 +1640,10 @@ extension SessionActions {
                 resolvedArguments: sshContext
             )
         } else {
-            let execName = executableName(for: session.source.baseKind)
+            let execName = resolvedExecutablePath(
+                for: session.source.baseKind,
+                executableURL: executableURL
+            )
             command = buildResumeCLIInvocation(
             session: session, executablePath: execName, options: options)
         }

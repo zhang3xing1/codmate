@@ -139,8 +139,8 @@ struct SettingsView: View {
       gitReviewSettings
     case .claudeCode:
       claudeCodeSettings
-    case .dialectics:
-      dialecticsSettings
+    case .advanced:
+      advancedSettings
     case .mcpServer:
       mcpServerSettings
     case .about:
@@ -155,46 +155,9 @@ struct SettingsView: View {
           Text("General Settings")
             .font(.title2)
             .fontWeight(.bold)
-          Text("Configure basic application settings and file paths")
+          Text("Configure basic application settings")
             .font(.subheadline)
             .foregroundColor(.secondary)
-        }
-
-        VStack(alignment: .leading, spacing: 10) {
-          Text("File Paths").font(.headline).fontWeight(.semibold)
-          settingsCard {
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
-              GridRow {
-                VStack(alignment: .leading, spacing: 0) {
-                  Label("Projects Directory", systemImage: "folder")
-                    .font(.subheadline).fontWeight(.medium)
-                  Text("Directory where CodMate stores projects data")
-                    .font(.caption).foregroundColor(.secondary)
-                }
-                Text(preferences.projectsRoot.path)
-                  .lineLimit(1)
-                  .truncationMode(.middle)
-                  .frame(maxWidth: .infinity, alignment: .trailing)
-                Button("Change…", action: selectProjectsRoot)
-                  .buttonStyle(.bordered)
-              }
-              gridDivider
-              GridRow {
-                VStack(alignment: .leading, spacing: 0) {
-                  Label("Notes Directory", systemImage: "text.book.closed")
-                    .font(.subheadline).fontWeight(.medium)
-                  Text("Where session titles and comments are saved")
-                    .font(.caption).foregroundColor(.secondary)
-                }
-                Text(preferences.notesRoot.path)
-                  .lineLimit(1)
-                  .truncationMode(.middle)
-                  .frame(maxWidth: .infinity, alignment: .trailing)
-                Button("Change…", action: selectNotesRoot)
-                  .buttonStyle(.bordered)
-              }
-            }
-          }
         }
 
         VStack(alignment: .leading, spacing: 10) {
@@ -440,10 +403,10 @@ struct SettingsView: View {
     }
   }
 
-  // MARK: - Dialectics
-  private var dialecticsSettings: some View {
+  // MARK: - Advanced
+  private var advancedSettings: some View {
     settingsScroll {
-      DialecticsPane(preferences: preferences)
+      AdvancedSettingsView(preferences: preferences)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
   }
@@ -490,7 +453,7 @@ struct SettingsView: View {
                     .font(.caption).foregroundColor(.secondary)
                 }
                 Picker("", selection: $preferences.defaultResumeExternalApp) {
-                  ForEach(TerminalApp.allCases) { app in
+                  ForEach(TerminalApp.availableExternalAppsIncludingNone) { app in
                     Text(app.title).tag(app)
                   }
                 }
@@ -651,7 +614,7 @@ struct SettingsView: View {
                     .font(.caption).foregroundColor(.secondary)
                 }
                 Picker("", selection: $preferences.defaultResumeExternalApp) {
-                  ForEach(TerminalApp.allCases) { app in
+                  ForEach(TerminalApp.availableExternalAppsIncludingNone) { app in
                     Text(app.title).tag(app)
                   }
                 }
@@ -1110,44 +1073,14 @@ struct SettingsView: View {
     return firstLine
   }
 
-  private func selectProjectsRoot() {
-    let panel = NSOpenPanel()
-    panel.canChooseFiles = false
-    panel.canChooseDirectories = true
-    panel.allowsMultipleSelection = false
-    panel.canCreateDirectories = true
-    panel.directoryURL = preferences.projectsRoot
-    panel.message = "Select the directory where CodMate stores projects data"
-
-    panel.begin { response in
-      guard response == .OK, let url = panel.url else { return }
-      Task { await viewModel.updateProjectsRoot(to: url) }
-    }
-  }
-
-  // Removed Codex/Claude executable choosers – rely on PATH
-
-  private func selectNotesRoot() {
-    let panel = NSOpenPanel()
-    panel.canChooseFiles = false
-    panel.canChooseDirectories = true
-    panel.allowsMultipleSelection = false
-    panel.canCreateDirectories = true
-    panel.directoryURL = preferences.notesRoot
-    panel.message = "Select the directory where session notes are stored"
-
-    panel.begin { response in
-      guard response == .OK, let url = panel.url else { return }
-      Task { await viewModel.updateNotesRoot(to: url) }
-    }
-  }
-
   private func resetToDefaults() {
     preferences.projectsRoot = SessionPreferencesStore.defaultProjectsRoot(
       for: FileManager.default.homeDirectoryForCurrentUser)
     preferences.notesRoot = SessionPreferencesStore.defaultNotesRoot(
       for: preferences.sessionsRoot)
-    // CLI paths are not user-configurable; rely on PATH
+    preferences.codexCommandPath = ""
+    preferences.claudeCommandPath = ""
+    preferences.geminiCommandPath = ""
     preferences.defaultResumeUseEmbeddedTerminal = true
     preferences.defaultResumeCopyToClipboard = true
     preferences.defaultResumeExternalApp = .terminal

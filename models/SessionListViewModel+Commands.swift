@@ -18,9 +18,17 @@ extension SessionListViewModel {
     }
 
     private func preferredExecutableURL(for source: SessionSource) -> URL {
-        // Deprecated: executable paths are no longer user-configurable.
-        // Keep a placeholder URL to satisfy legacy APIs; execution uses PATH.
+        if let override = preferences.resolvedCommandOverrideURL(for: source.baseKind) {
+            return override
+        }
         return URL(fileURLWithPath: "/usr/bin/env")
+    }
+
+    private func preferredExecutablePath(for kind: SessionSource.Kind) -> String {
+        if let override = preferences.resolvedCommandOverrideURL(for: kind) {
+            return override.path
+        }
+        return kind.cliExecutableName
     }
 
     func copyResumeCommands(session: SessionSummary) {
@@ -125,7 +133,7 @@ extension SessionListViewModel {
     }
 
     func buildResumeCLIInvocation(session: SessionSummary) -> String {
-        let execName = session.source.baseKind.cliExecutableName
+        let execName = preferredExecutablePath(for: session.source.baseKind)
         return actions.buildResumeCLIInvocation(
             session: session,
             executablePath: execName,
@@ -156,11 +164,13 @@ extension SessionListViewModel {
             p.profile != nil || (p.profileId?.isEmpty == false)
         {
             return actions.buildResumeUsingProjectProfileCLIInvocation(
-                session: session, project: p, executablePath: "codex",
+                session: session, project: p, executablePath: preferredExecutablePath(for: .codex),
                 options: preferences.resumeOptions)
         }
         return actions.buildResumeCLIInvocation(
-            session: session, executablePath: session.source.baseKind.cliExecutableName, options: preferences.resumeOptions)
+            session: session,
+            executablePath: preferredExecutablePath(for: session.source.baseKind),
+            options: preferences.resumeOptions)
     }
 
     func copyNewSessionCommands(session: SessionSummary) {
@@ -174,7 +184,8 @@ extension SessionListViewModel {
     func buildNewSessionCLIInvocation(session: SessionSummary) -> String {
         actions.buildNewSessionCLIInvocation(
             session: session,
-            options: preferences.resumeOptions
+            options: preferences.resumeOptions,
+            executablePath: preferredExecutablePath(for: session.source.baseKind)
         )
     }
 
@@ -187,7 +198,11 @@ extension SessionListViewModel {
     }
 
     func buildNewProjectCLIInvocation(project: Project) -> String {
-        actions.buildNewProjectCLIInvocation(project: project, options: preferences.resumeOptions)
+        actions.buildNewProjectCLIInvocation(
+            project: project,
+            options: preferences.resumeOptions,
+            executablePath: preferredExecutablePath(for: .codex)
+        )
     }
 
     @discardableResult
@@ -298,12 +313,14 @@ extension SessionListViewModel {
                 session: session,
                 project: p,
                 options: preferences.resumeOptions,
-                initialPrompt: initialPrompt)
+                initialPrompt: initialPrompt,
+                executablePath: preferredExecutablePath(for: session.source.baseKind))
         }
         return actions.buildNewSessionCLIInvocation(
             session: session,
             options: preferences.resumeOptions,
-            initialPrompt: initialPrompt)
+            initialPrompt: initialPrompt,
+            executablePath: preferredExecutablePath(for: session.source.baseKind))
     }
 
     @discardableResult
@@ -369,7 +386,10 @@ extension SessionListViewModel {
                 titleHint: warpHint)
         } else {
             let cmd = actions.buildNewSessionCLIInvocation(
-                session: session, options: preferences.resumeOptions, initialPrompt: initialPrompt)
+                session: session,
+                options: preferences.resumeOptions,
+                initialPrompt: initialPrompt,
+                executablePath: preferredExecutablePath(for: session.source.baseKind))
             let pb = NSPasteboard.general
             pb.clearContents()
             if destinationApp == .warp, let title = warpHint {
@@ -518,6 +538,7 @@ extension SessionListViewModel {
         _ = actions.openWarpLaunchConfig(
             session: session,
             options: preferences.resumeOptions,
+            executableURL: preferredExecutableURL(for: session.source),
             workingDirectory: cwd
         )
     }

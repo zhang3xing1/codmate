@@ -70,7 +70,8 @@ Coding Guidelines
 - Testability: keep parsers and small helpers pure; avoid `Process()`/AppKit in ViewModel.
 
 CLI Integration (codex)
-- Do not expose user-configurable CLI paths. Always invoke via `/usr/bin/env codex` (or `claude`) so resolution happens on system `PATH`.
+- Prefer invoking via `/usr/bin/env codex` (or `claude`) so resolution happens on system `PATH`.
+- Allow optional user-specified command path overrides; use the override when valid, otherwise fall back to PATH resolution.
 - Always set `PATH` to include `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` before launching for robustness.
 - `resume` runs with `currentDirectoryURL` = original session `cwd` when it exists (fallback: log file directory).
 - New command options exposed in Settings › Command:
@@ -120,13 +121,16 @@ File/Folder Layout
 - CodMate/Info.plist – bundled via build settings; do NOT add to Copy Bundle Resources.
 - CodMate.xcodeproj – single app target “CodMate”.
 
-Dialectics Page
-- Adds a dedicated Settings › Dialectics page (between MCP Server and About) that aggregates diagnostics:
+Advanced Page
+- Settings › Advanced (between MCP Server and About) uses a TabView with Path and Dialectics tabs.
+- Path tab:
+  - File paths (Projects/Notes) and CLI command path overrides (codex/claude/gemini)
+  - CLI environment snapshot (auto-detected paths + PATH)
+- Dialectics tab aggregates diagnostics:
   - Codex sessions root probe (current vs default), counts and sample files, enumerator errors
   - Claude sessions directory probe (default path), counts and samples
   - Notes and Projects directories probes (current vs default), counts and sample files
-  - CLI environment: preferred and resolved codex and Claude paths, PATH snapshot
-  - Does not mutate config automatically; changes only happen via explicit user actions in other pages
+  - Does not mutate config automatically; changes only happen via explicit user actions
 
 Build & Run
 - Prefer Xcode-based builds over `swift build`; do not use `swift build` for validating this app.

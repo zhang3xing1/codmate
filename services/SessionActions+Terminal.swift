@@ -151,6 +151,7 @@ extension SessionActions {
     func openWarpLaunchConfig(
         session: SessionSummary,
         options: ResumeOptions,
+        executableURL: URL,
         workingDirectory: String? = nil
     ) -> Bool {
         let cwd = self.workingDirectory(for: session, override: workingDirectory)
@@ -164,16 +165,13 @@ extension SessionActions {
         let baseName = "codmate-resume-\(session.id)"
         let fileName = baseName + ".yaml"
         let fileURL = folder.appendingPathComponent(fileName)
-        let flagsString: String = {
-            // Use configured options; prefer bare `codex` so Warp resolves via PATH.
-            let cmd = buildResumeCLIInvocation(
-                session: session, executablePath: "codex", options: options)
-            // buildResumeCLIInvocation quotes the executable; strip single quotes for YAML simplicity.
-            if cmd.hasPrefix("'codex'") { return String(cmd.dropFirst("'codex' ".count)) }
-            if cmd.hasPrefix("\"codex\"") { return String(cmd.dropFirst("\"codex\" ".count)) }
-            // Fallback: remove leading "codex " if present
-            if cmd.hasPrefix("codex ") { return String(cmd.dropFirst("codex ".count)) }
-            return cmd
+        let commandString: String = {
+            let execPath = resolvedExecutablePath(
+                for: session.source.baseKind,
+                executableURL: executableURL
+            )
+            return buildResumeCLIInvocation(
+                session: session, executablePath: execPath, options: options)
         }()
 
         let yaml = """
@@ -185,7 +183,7 @@ extension SessionActions {
                     panes:
                       - cwd: \(cwd)
                         commands:
-                          - exec: codex \(flagsString)
+                          - exec: \(commandString)
             """
         do { try yaml.data(using: String.Encoding.utf8)?.write(to: fileURL) } catch {}
 

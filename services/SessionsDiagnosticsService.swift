@@ -23,6 +23,9 @@ struct SessionsDiagnostics: Codable, Sendable {
     // Claude sessions (.jsonl)
     var claudeCurrent: Probe?
     var claudeDefault: Probe
+    // Gemini sessions (.json)
+    var geminiCurrent: Probe?
+    var geminiDefault: Probe
     var suggestions: [String]
 }
 
@@ -41,7 +44,9 @@ actor SessionsDiagnosticsService {
         projectsCurrentRoot: URL,
         projectsDefaultRoot: URL,
         claudeCurrentRoot: URL?,
-        claudeDefaultRoot: URL
+        claudeDefaultRoot: URL,
+        geminiCurrentRoot: URL?,
+        geminiDefaultRoot: URL
     ) async -> SessionsDiagnostics {
         let currentProbe = probe(root: currentRoot, fileExtension: "jsonl")
         let defaultProbe = probe(root: defaultRoot, fileExtension: "jsonl")
@@ -51,6 +56,8 @@ actor SessionsDiagnosticsService {
         let projectsDefault = probe(root: projectsDefaultRoot, fileExtension: "json")
         let claudeCurrent = claudeCurrentRoot.map { probe(root: $0, fileExtension: "jsonl") }
         let claudeDefault = probe(root: claudeDefaultRoot, fileExtension: "jsonl")
+        let geminiCurrent = geminiCurrentRoot.map { probe(root: $0, fileExtension: "json") }
+        let geminiDefault = probe(root: geminiDefaultRoot, fileExtension: "json")
 
         var suggestions: [String] = []
         if currentProbe.enumeratedCount == 0, defaultProbe.enumeratedCount > 0,
@@ -99,6 +106,14 @@ actor SessionsDiagnosticsService {
             suggestions.append("Claude default sessions directory (~/.claude/projects) not found.")
         }
 
+        if let gc = geminiCurrent {
+            if !gc.exists {
+                suggestions.append("Gemini sessions directory not found; ensure Gemini CLI writes logs under ~/.gemini/tmp.")
+            }
+        } else if !geminiDefault.exists {
+            suggestions.append("Gemini default sessions directory (~/.gemini/tmp) not found.")
+        }
+
         return SessionsDiagnostics(
             timestamp: Date(),
             current: currentProbe,
@@ -109,6 +124,8 @@ actor SessionsDiagnosticsService {
             projectsDefault: projectsDefault,
             claudeCurrent: claudeCurrent,
             claudeDefault: claudeDefault,
+            geminiCurrent: geminiCurrent,
+            geminiDefault: geminiDefault,
             suggestions: suggestions
         )
     }

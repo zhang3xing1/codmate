@@ -10,6 +10,8 @@ final class DialecticsVM: ObservableObject {
     @Published var codexVersion: String? = nil
     @Published var claudePresent: Bool = false
     @Published var claudeVersion: String? = nil
+    @Published var geminiPresent: Bool = false
+    @Published var geminiVersion: String? = nil
     @Published var pathEnv: String = ProcessInfo.processInfo.environment["PATH"] ?? ""
     @Published var sandboxOn: Bool = ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
 
@@ -22,6 +24,8 @@ final class DialecticsVM: ObservableObject {
         let projectsDefault = SessionPreferencesStore.defaultProjectsRoot(for: home)
         let claudeDefault = home.appendingPathComponent(".claude", isDirectory: true).appendingPathComponent("projects", isDirectory: true)
         let claudeCurrent: URL? = FileManager.default.fileExists(atPath: claudeDefault.path) ? claudeDefault : nil
+        let geminiDefault = home.appendingPathComponent(".gemini", isDirectory: true).appendingPathComponent("tmp", isDirectory: true)
+        let geminiCurrent: URL? = FileManager.default.fileExists(atPath: geminiDefault.path) ? geminiDefault : nil
         let s = await sessionsSvc.run(
             currentRoot: preferences.sessionsRoot,
             defaultRoot: defRoot,
@@ -30,7 +34,9 @@ final class DialecticsVM: ObservableObject {
             projectsCurrentRoot: preferences.projectsRoot,
             projectsDefaultRoot: projectsDefault,
             claudeCurrentRoot: claudeCurrent,
-            claudeDefaultRoot: claudeDefault
+            claudeDefaultRoot: claudeDefault,
+            geminiCurrentRoot: geminiCurrent,
+            geminiDefaultRoot: geminiDefault
         )
         let sandboxed = ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
         // Prefer a robust PATH in sandboxed mode; shell-derived PATH can be restricted
@@ -41,159 +47,22 @@ final class DialecticsVM: ObservableObject {
             let usrLocal = URL(fileURLWithPath: "/usr/local/bin", isDirectory: true)
             _ = SecurityScopedBookmarks.shared.startAccessDynamic(for: brew)
             _ = SecurityScopedBookmarks.shared.startAccessDynamic(for: usrLocal)
-            mergedPATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+            mergedPATH = CLIEnvironment.resolvedPATHForCLI(sandboxed: true)
         } else {
-            mergedPATH = Self.detectLoginShellPATH() ?? Self.defaultMergedPATH()
+            mergedPATH = CLIEnvironment.resolvedPATHForCLI(sandboxed: false)
         }
-        let resolved = Self.which("codex", path: mergedPATH)
-        let resolvedClaude = Self.which("claude", path: mergedPATH)
+        let resolved = CLIEnvironment.resolveExecutablePath("codex", path: mergedPATH)
+        let resolvedClaude = CLIEnvironment.resolveExecutablePath("claude", path: mergedPATH)
+        let resolvedGemini = CLIEnvironment.resolveExecutablePath("gemini", path: mergedPATH)
         self.sessions = s
         self.codexPresent = (resolved != nil)
         self.claudePresent = (resolvedClaude != nil)
-        self.codexVersion = resolved != nil ? Self.version(of: "codex", path: mergedPATH) : nil
-        self.claudeVersion = resolvedClaude != nil ? Self.version(of: "claude", path: mergedPATH) : nil
+        self.geminiPresent = (resolvedGemini != nil)
+        self.codexVersion = resolved.flatMap { CLIEnvironment.version(atExecutablePath: $0, path: mergedPATH) }
+        self.claudeVersion = resolvedClaude.flatMap { CLIEnvironment.version(atExecutablePath: $0, path: mergedPATH) }
+        self.geminiVersion = resolvedGemini.flatMap { CLIEnvironment.version(atExecutablePath: $0, path: mergedPATH) }
         self.pathEnv = mergedPATH
         self.sandboxOn = sandboxed
-    }
-
-    private static func defaultMergedPATH() -> String {
-        let current = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        let defaultPATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        if current.isEmpty { return defaultPATH }
-        // Prepend default to prefer Homebrew paths while preserving user's PATH
-        return defaultPATH + ":" + current
-    }
-
-    private static func detectLoginShellPATH() -> String? {
-        // Ask user's login+interactive shell to print PATH (covers .zprofile/.bash_profile + .zshrc/.bashrc)
-        let env = ProcessInfo.processInfo.environment
-        let shell = env["SHELL"] ?? "/bin/zsh"
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: shell)
-        proc.arguments = ["-lic", "printf %s \"$PATH\""]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = Pipe()
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-        } catch { return nil }
-        guard proc.terminationStatus == 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (str?.isEmpty == false) ? str : nil
-    }
-
-    private static func shellWhich(_ name: String) -> String? {
-        let env = ProcessInfo.processInfo.environment
-        let shell = env["SHELL"] ?? "/bin/zsh"
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: shell)
-        proc.arguments = ["-lic", "command -v \(name) || which \(name)"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = Pipe()
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-        } catch { return nil }
-        guard proc.terminationStatus == 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (str?.isEmpty == false) ? str : nil
-    }
-
-    private static func which(_ name: String, path: String) -> String? {
-        // Attempt 1: which
-        do {
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            proc.arguments = ["which", name]
-            let pipe = Pipe()
-            proc.standardOutput = pipe
-            proc.standardError = Pipe()
-            var env = ProcessInfo.processInfo.environment
-            env["PATH"] = path
-            proc.environment = env
-            try proc.run()
-            proc.waitUntilExit()
-            if proc.terminationStatus == 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !str.isEmpty {
-                    return str
-                }
-            }
-        } catch { /* continue to fallback */ }
-
-        // Attempt 2: shell-based lookup (respects user's rc files)
-        if let viaShell = shellWhich(name) { return viaShell }
-
-        // Attempt 3: manual PATH scan
-        let fm = FileManager.default
-        for dir in path.split(separator: ":").map(String.init) {
-            let candidate = (dir.hasSuffix("/") ? dir + name : dir + "/" + name)
-            if fm.isExecutableFile(atPath: candidate) { return candidate }
-        }
-        return nil
-    }
-
-    private static func version(of name: String, path: String) -> String? {
-        // Try common version flags: --version, version, -V, -v
-        let candidates: [[String]] = [["--version"], ["version"], ["-V"], ["-v"]]
-        for args in candidates {
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            proc.arguments = [name] + args
-            let outPipe = Pipe()
-            let errPipe = Pipe()
-            proc.standardOutput = outPipe
-            proc.standardError = errPipe
-            var env = ProcessInfo.processInfo.environment
-            env["PATH"] = path
-            env["NO_COLOR"] = "1"
-            proc.environment = env
-            do {
-                try proc.run()
-                proc.waitUntilExit()
-            } catch { continue }
-
-            // Read both stdout and stderr (some CLIs print version to stderr)
-            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            var out = (String(data: outData, encoding: .utf8) ?? "")
-            let err = (String(data: errData, encoding: .utf8) ?? "")
-            if out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                out = err
-            }
-            out = out.trimmingCharacters(in: .whitespacesAndNewlines)
-            if out.isEmpty { continue }
-            if let firstLine = out.split(separator: "\n").first { out = String(firstLine) }
-            if let ver = firstVersionToken(in: out) { return ver }
-            // Accept non-empty banner as fallback
-            return String(out.prefix(48))
-        }
-        return nil
-    }
-
-    private static func firstVersionToken(in line: String) -> String? {
-        // Match first token that looks like digits[.digits][.digits][-.suffix]
-        // Lightweight scan to avoid Regex dependency differences
-        let separators = CharacterSet.whitespacesAndNewlines
-        let tokens = line.components(separatedBy: separators).filter { !$0.isEmpty }
-        for t in tokens {
-            var s = t
-            // Trim common punctuation
-            s = s.trimmingCharacters(in: CharacterSet(charactersIn: ",;()[]{}"))
-            // Basic pattern check
-            let parts = s.split(separator: ".")
-            if parts.count >= 2 && parts.count <= 4 && parts.allSatisfy({ $0.allSatisfy({ $0.isNumber }) || $0.contains("-") }) {
-                // Allow hyphenated suffix like 1.2.3-beta
-                let core = parts.prefix(3)
-                if core.allSatisfy({ $0.allSatisfy({ $0.isNumber }) }) { return s }
-            }
-        }
-        return nil
     }
 
     var appVersion: String {
@@ -218,16 +87,68 @@ final class DialecticsVM: ObservableObject {
     }
 
     // MARK: - Report
+    struct CLICommandReport: Codable {
+        let detectedPath: String?
+        let detectedVersion: String?
+        let userOverridePath: String?
+        let userOverrideResolvedPath: String?
+        let userOverrideVersion: String?
+        let resolvedPath: String?
+        let resolvedVersion: String?
+    }
+
+    struct CLIReport: Codable {
+        let pathEnv: String
+        let sandboxed: Bool
+        let commands: [String: CLICommandReport]
+    }
+
+    struct RipgrepReport: Codable {
+        let cachedCoverageEntries: Int
+        let cachedToolEntries: Int
+        let cachedTokenEntries: Int
+        let lastCoverageScan: Date?
+        let lastToolScan: Date?
+        let lastTokenScan: Date?
+    }
+
+    struct SessionIndexMetaReport: Codable {
+        let lastFullIndexAt: Date?
+        let sessionCount: Int
+    }
+
+    struct SessionIndexCoverageReport: Codable {
+        let sessionCount: Int
+        let lastFullIndexAt: Date?
+        let sources: [String]
+    }
+
+    struct SessionIndexReport: Codable {
+        let meta: SessionIndexMetaReport?
+        let coverage: SessionIndexCoverageReport?
+    }
+
+    struct CacheReport: Codable {
+        let sessionIndex: SessionIndexReport?
+        let ripgrep: RipgrepReport?
+    }
+
     struct CombinedReport: Codable {
         let timestamp: Date
         let appVersion: String
         let buildTime: String
         let osVersion: String
         let sessions: SessionsDiagnostics?
-        let cli: [String: String?]
+        let cli: CLIReport
+        let caches: CacheReport?
     }
 
-    func saveReport(preferences: SessionPreferencesStore) {
+    func saveReport(
+        preferences: SessionPreferencesStore,
+        ripgrepReport: SessionRipgrepStore.Diagnostics?,
+        indexMeta: SessionIndexMeta?,
+        cacheCoverage: SessionIndexCoverage?
+    ) {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
         panel.allowedContentTypes = [.json]
@@ -239,7 +160,13 @@ final class DialecticsVM: ObservableObject {
             for: NSApplication.shared.keyWindow ?? NSApplication.shared.windows.first!
         ) { resp in
             guard resp == .OK, let url = panel.url else { return }
-            let report = self.buildReport(preferences: preferences, now: now)
+            let report = self.buildReport(
+                preferences: preferences,
+                now: now,
+                ripgrepReport: ripgrepReport,
+                indexMeta: indexMeta,
+                cacheCoverage: cacheCoverage
+            )
             let enc = JSONEncoder()
             enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
             enc.dateEncodingStrategy = .iso8601
@@ -249,23 +176,91 @@ final class DialecticsVM: ObservableObject {
         }
     }
 
-    @MainActor private func buildReport(preferences: SessionPreferencesStore, now: Date)
-        -> CombinedReport
-    {
-        let cli: [String: String?] = [
-            "codexPresent": String(codexPresent),
-            "codexVersion": codexVersion,
-            "claudePresent": String(claudePresent),
-            "claudeVersion": claudeVersion,
-            "PATH": pathEnv,
-        ]
+    @MainActor private func buildReport(
+        preferences: SessionPreferencesStore,
+        now: Date,
+        ripgrepReport: SessionRipgrepStore.Diagnostics?,
+        indexMeta: SessionIndexMeta?,
+        cacheCoverage: SessionIndexCoverage?
+    ) -> CombinedReport {
+        let path = pathEnv
+
+        func trimmedOverridePath(for kind: SessionSource.Kind) -> String? {
+            let raw: String
+            switch kind {
+            case .codex: raw = preferences.codexCommandPath
+            case .claude: raw = preferences.claudeCommandPath
+            case .gemini: raw = preferences.geminiCommandPath
+            }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        func commandReport(for kind: SessionSource.Kind) -> CLICommandReport {
+            let name = kind.cliExecutableName
+            let detectedPath = CLIEnvironment.resolveExecutablePath(name, path: path)
+            let detectedVersion = detectedPath.flatMap {
+                CLIEnvironment.version(atExecutablePath: $0, path: path)
+            }
+            let userOverridePath = trimmedOverridePath(for: kind)
+            let userResolvedPath = preferences.resolvedCommandOverrideURL(for: kind)?.path
+            let userVersion = userResolvedPath.flatMap {
+                CLIEnvironment.version(atExecutablePath: $0, path: path)
+            }
+            let resolvedPath = userResolvedPath ?? detectedPath
+            let resolvedVersion = userResolvedPath != nil ? userVersion : detectedVersion
+            return CLICommandReport(
+                detectedPath: detectedPath,
+                detectedVersion: detectedVersion,
+                userOverridePath: userOverridePath,
+                userOverrideResolvedPath: userResolvedPath,
+                userOverrideVersion: userVersion,
+                resolvedPath: resolvedPath,
+                resolvedVersion: resolvedVersion
+            )
+        }
+
+        let cli = CLIReport(
+            pathEnv: path,
+            sandboxed: sandboxOn,
+            commands: [
+                "codex": commandReport(for: .codex),
+                "claude": commandReport(for: .claude),
+                "gemini": commandReport(for: .gemini),
+            ]
+        )
+
+        let caches = CacheReport(
+            sessionIndex: SessionIndexReport(
+                meta: indexMeta.map { SessionIndexMetaReport(lastFullIndexAt: $0.lastFullIndexAt, sessionCount: $0.sessionCount) },
+                coverage: cacheCoverage.map {
+                    SessionIndexCoverageReport(
+                        sessionCount: $0.sessionCount,
+                        lastFullIndexAt: $0.lastFullIndexAt,
+                        sources: $0.sources.map(\.rawValue)
+                    )
+                }
+            ),
+            ripgrep: ripgrepReport.map {
+                RipgrepReport(
+                    cachedCoverageEntries: $0.cachedCoverageEntries,
+                    cachedToolEntries: $0.cachedToolEntries,
+                    cachedTokenEntries: $0.cachedTokenEntries,
+                    lastCoverageScan: $0.lastCoverageScan,
+                    lastToolScan: $0.lastToolScan,
+                    lastTokenScan: $0.lastTokenScan
+                )
+            }
+        )
+
         return CombinedReport(
             timestamp: now,
             appVersion: appVersion,
             buildTime: buildTime,
             osVersion: osVersion,
             sessions: sessions,
-            cli: cli
+            cli: cli,
+            caches: caches
         )
     }
 }

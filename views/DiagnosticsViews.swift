@@ -72,6 +72,24 @@ struct DiagnosticsSection: View {
                                         .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
                                 )
                         )
+                    Text("Gemini Sessions Directory").font(.headline).fontWeight(.semibold).padding(.top, 4)
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let gc = result.geminiCurrent {
+                            DataPairReportView(current: gc, defaultProbe: result.geminiDefault)
+                        } else {
+                            DataPairReportView(current: result.geminiDefault, defaultProbe: result.geminiDefault)
+                        }
+                    }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color(nsColor: .textBackgroundColor))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                                )
+                        )
                     Text("Notes Directory").font(.headline).fontWeight(.semibold).padding(.top, 4)
                     DataPairReportView(current: result.notesCurrent, defaultProbe: result.notesDefault)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -134,6 +152,8 @@ struct DiagnosticsSection: View {
         let projectsDefault = SessionPreferencesStore.defaultProjectsRoot(for: home)
         let claudeDefault = home.appendingPathComponent(".claude", isDirectory: true).appendingPathComponent("projects", isDirectory: true)
         let claudeCurrent: URL? = FileManager.default.fileExists(atPath: claudeDefault.path) ? claudeDefault : nil
+        let geminiDefault = home.appendingPathComponent(".gemini", isDirectory: true).appendingPathComponent("tmp", isDirectory: true)
+        let geminiCurrent: URL? = FileManager.default.fileExists(atPath: geminiDefault.path) ? geminiDefault : nil
         Task {
             let res = await service.run(
                 currentRoot: current,
@@ -143,7 +163,9 @@ struct DiagnosticsSection: View {
                 projectsCurrentRoot: projectsCurrent,
                 projectsDefaultRoot: projectsDefault,
                 claudeCurrentRoot: claudeCurrent,
-                claudeDefaultRoot: claudeDefault
+                claudeDefaultRoot: claudeDefault,
+                geminiCurrentRoot: geminiCurrent,
+                geminiDefaultRoot: geminiDefault
             )
             await MainActor.run {
                 self.lastResult = res

@@ -27,30 +27,6 @@ struct DialecticsPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Dialectics")
-                            .font(.title2)
-                            .fontWeight(.bold)
-                        Text("Deep diagnostics for sessions, providers, and environment")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer(minLength: 8)
-                    Button {
-                        Task { await vm.runAll(preferences: preferences) }
-                    } label: {
-                        Label("Run Diagnostics", systemImage: "stethoscope")
-                    }
-                    .buttonStyle(.bordered)
-                    Button {
-                        vm.saveReport(preferences: preferences)
-                    } label: {
-                        Label("Save Report…", systemImage: "square.and.arrow.down")
-                    }
-                    .buttonStyle(.bordered)
-                }
-
                 // App & OS
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Environment").font(.headline).fontWeight(.semibold)
@@ -252,6 +228,24 @@ struct DialecticsPane: View {
                     }
                 }
 
+                // Gemini sessions diagnostics
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Gemini Sessions Directory").font(.headline).fontWeight(.semibold)
+                    if let s = vm.sessions {
+                        settingsCard {
+                            if let gc = s.geminiCurrent {
+                                DataPairReportView(current: gc, defaultProbe: s.geminiDefault)
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                            } else {
+                                DataPairReportView(current: s.geminiDefault, defaultProbe: s.geminiDefault)
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                            }
+                        }
+                    } else {
+                        Text("No data yet. Click Run Diagnostics.").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
                 // Notes diagnostics
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Notes Directory").font(.headline).fontWeight(.semibold)
@@ -279,33 +273,28 @@ struct DialecticsPane: View {
                 }
 
 
-                // CLI diagnostics
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("CLI & PATH").font(.headline).fontWeight(.semibold)
-                    settingsCard {
-                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-                        GridRow {
-                            Text("codex on PATH").font(.subheadline)
-                            Text(vm.codexPresent ? (vm.codexVersion ?? "Yes") : "N/A")
-                                .font(.caption)
-                                .frame(maxWidth: .infinity, alignment: .trailing)
-                        }
-                        GridRow {
-                            Text("claude on PATH").font(.subheadline)
-                            Text(vm.claudePresent ? (vm.claudeVersion ?? "Yes") : "N/A")
-                                .font(.caption)
-                                .frame(maxWidth: .infinity, alignment: .trailing)
-                        }
-                        GridRow {
-                            Text("PATH").font(.subheadline)
-                            Text(vm.pathEnv).font(.caption).lineLimit(2).truncationMode(.middle)
-                                .frame(maxWidth: .infinity, alignment: .trailing)
-                        }
-                        }
-                    }
-                }
-
                 // Removed: Authorization Shortcuts — unify to on-demand authorization in context
+
+                HStack {
+                    Spacer(minLength: 8)
+                    Button {
+                        Task { await vm.runAll(preferences: preferences) }
+                    } label: {
+                        Label("Run Diagnostics", systemImage: "stethoscope")
+                    }
+                    .buttonStyle(.bordered)
+                    Button {
+                        vm.saveReport(
+                            preferences: preferences,
+                            ripgrepReport: ripgrepReport,
+                            indexMeta: listViewModel.indexMeta,
+                            cacheCoverage: listViewModel.cacheCoverage
+                        )
+                    } label: {
+                        Label("Save Report…", systemImage: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.bordered)
+                }
             }
             .task { await vm.runAll(preferences: preferences) }
             .task { await refreshRipgrepDiagnostics() }

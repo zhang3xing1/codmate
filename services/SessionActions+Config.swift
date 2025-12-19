@@ -10,7 +10,7 @@ extension SessionActions {
         case "gpt-5", "gpt5":
             return "gpt-5.2"
         case "gpt-5-codex", "gpt5-codex":
-            return "gpt-5.1-codex"
+            return "gpt-5.2-codex"
         case "gpt-5-codex-max", "gpt5-codex-max":
             return "gpt-5.1-codex-max"
         case "gpt-5-codex-mini", "gpt5-codex-mini":

@@ -642,8 +642,7 @@ extension SessionListColumnView {
   }
 
   private func workingDirectory(for session: SessionSummary) -> String {
-    let trimmed = session.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
-    return trimmed.isEmpty ? NSHomeDirectory() : trimmed
+    viewModel.resolvedWorkingDirectory(for: session)
   }
 
   private func launchNewSession(

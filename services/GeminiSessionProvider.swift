@@ -20,6 +20,13 @@ actor GeminiSessionProvider {
     let timestamp: String
   }
 
+  private struct GeminiSessionValidationRecord: Decodable {
+    struct Message: Decodable {
+      let type: String?
+    }
+    let messages: [Message]?
+  }
+
   private let parser = GeminiSessionParser()
   private var projectsStore: ProjectsStore
   private let fileManager: FileManager
@@ -67,6 +74,7 @@ actor GeminiSessionProvider {
         modificationDate: latest,
         fileSize: signature.chatsTotalSize
       ) else { continue }
+      if sessionValidity(for: file.url) == .invalid { continue }
       let summary = cached.overridingSource(.geminiLocal)
       canonicalURLById[summary.id] = file.url
       if let existing = bestById[summary.id] {
@@ -76,6 +84,25 @@ actor GeminiSessionProvider {
       }
     }
     return Array(bestById.values)
+  }
+
+  private enum GeminiSessionValidity {
+    case valid
+    case invalid
+    case unknown
+  }
+
+  private func sessionValidity(for url: URL) -> GeminiSessionValidity {
+    guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { return .unknown }
+    guard let record = try? JSONDecoder().decode(GeminiSessionValidationRecord.self, from: data) else {
+      return .unknown
+    }
+    guard let messages = record.messages, !messages.isEmpty else { return .invalid }
+    for message in messages {
+      let kind = message.type?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      if kind == "user" || kind == "gemini" { return .valid }
+    }
+    return .invalid
   }
 
   private func persist(summary: SessionSummary, modificationDate: Date?, fileSize: UInt64?) {

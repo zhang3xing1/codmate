@@ -4,7 +4,12 @@ import Foundation
 
 extension SessionActions {
     @MainActor
-    func resume(session: SessionSummary, executableURL: URL, options: ResumeOptions) async throws
+    func resume(
+        session: SessionSummary,
+        executableURL: URL,
+        options: ResumeOptions,
+        workingDirectory: String? = nil
+    ) async throws
         -> ProcessResult
     {
         // Always invoke via /usr/bin/env to rely on system PATH resolution.
@@ -55,13 +60,8 @@ extension SessionActions {
         }
         
         return try await withCheckedThrowingContinuation { continuation in
-            let cwd: URL = {
-                if FileManager.default.fileExists(atPath: session.cwd) {
-                    return URL(fileURLWithPath: session.cwd, isDirectory: true)
-                } else {
-                    return session.fileURL.deletingLastPathComponent()
-                }
-            }()
+            let cwd = self.workingDirectory(for: session, override: workingDirectory)
+            let cwdURL = URL(fileURLWithPath: cwd, isDirectory: true)
             Task.detached {
                 do {
                     let process = Process()
@@ -69,7 +69,7 @@ extension SessionActions {
                     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
                     process.arguments = [exeName] + args
                     // Prefer original session cwd if exists
-                    process.currentDirectoryURL = cwd
+                    process.currentDirectoryURL = cwdURL
 
                     let pipe = Pipe()
                     process.standardOutput = pipe
@@ -501,12 +501,13 @@ extension SessionActions {
     }
 
     func buildResumeCommandLines(
-        session: SessionSummary, executableURL: URL, options: ResumeOptions
+        session: SessionSummary,
+        executableURL: URL,
+        options: ResumeOptions,
+        workingDirectory: String? = nil
     ) -> String {
         #if APPSTORE
-        let cwd =
-            FileManager.default.fileExists(atPath: session.cwd)
-            ? session.cwd : session.fileURL.deletingLastPathComponent().path
+        let cwd = self.workingDirectory(for: session, override: workingDirectory)
         let cd = "cd " + shellEscapedPath(cwd)
         let exports = embeddedExportLines(for: session.source).joined(separator: "; ")
         // MAS sandbox: do not auto-execute external CLI inside the app. Only prepare directory and env.
@@ -527,9 +528,7 @@ extension SessionActions {
                 resolvedArguments: sshContext
             ) + "\n"
         }
-        let cwd =
-            FileManager.default.fileExists(atPath: session.cwd)
-            ? session.cwd : session.fileURL.deletingLastPathComponent().path
+        let cwd = self.workingDirectory(for: session, override: workingDirectory)
         let cd = "cd " + shellEscapedPath(cwd)
         var exportLines = embeddedExportLines(for: session.source)
         if session.source.baseKind == .gemini {
@@ -629,7 +628,10 @@ extension SessionActions {
 
     // Simplified two-line command for external terminals
     func buildExternalResumeCommands(
-        session: SessionSummary, executableURL: URL, options: ResumeOptions
+        session: SessionSummary,
+        executableURL: URL,
+        options: ResumeOptions,
+        workingDirectory: String? = nil
     ) -> String {
         if session.isRemote, let host = session.remoteHost {
             let sshContext = resolvedSSHContext(for: host)
@@ -643,9 +645,7 @@ extension SessionActions {
                 resolvedArguments: sshContext
             ) + "\n"
         }
-        let cwd =
-            FileManager.default.fileExists(atPath: session.cwd)
-            ? session.cwd : session.fileURL.deletingLastPathComponent().path
+        let cwd = self.workingDirectory(for: session, override: workingDirectory)
         let cd = "cd " + shellEscapedPath(cwd)
         let execPath = executableName(for: session.source.baseKind)
         let resume = buildResumeCLIInvocation(
@@ -764,7 +764,8 @@ extension SessionActions {
         session: SessionSummary, executableURL: URL, options: ResumeOptions,
         simplifiedForExternal: Bool = true,
         destinationApp: TerminalApp? = nil,
-        titleHint: String? = nil
+        titleHint: String? = nil,
+        workingDirectory: String? = nil
     ) {
         let commands: String
         if simplifiedForExternal, destinationApp == .warp {
@@ -774,9 +775,15 @@ extension SessionActions {
             commands =
                 simplifiedForExternal
                 ? buildExternalResumeCommands(
-                    session: session, executableURL: executableURL, options: options)
+                    session: session,
+                    executableURL: executableURL,
+                    options: options,
+                    workingDirectory: workingDirectory)
                 : buildResumeCommandLines(
-                    session: session, executableURL: executableURL, options: options)
+                    session: session,
+                    executableURL: executableURL,
+                    options: options,
+                    workingDirectory: workingDirectory)
         }
         let pb = NSPasteboard.general
         pb.clearContents()

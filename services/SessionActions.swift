@@ -60,8 +60,10 @@ struct SessionActions {
             return preferred
         }
         // Fallback to PATH resolution
-        guard let path = ProcessInfo.processInfo.environment["PATH"] else { return nil }
-        let components = path.split(separator: ":")
+        let basePath = CLIEnvironment.buildBasePATH()
+        let currentPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let combined = currentPath.isEmpty ? basePath : basePath + ":" + currentPath
+        let components = combined.split(separator: ":")
         for component in components {
             let candidate = URL(fileURLWithPath: String(component)).appendingPathComponent(executableName)
             if fileManager.fileExists(atPath: candidate.path) {
@@ -151,7 +153,7 @@ struct SessionActions {
         return lines
     }
 
-    private func workingDirectory(for session: SessionSummary) -> String {
+    func workingDirectory(for session: SessionSummary, override: String? = nil) -> String {
         if session.isRemote {
             let trimmed = session.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
@@ -162,6 +164,12 @@ struct SessionActions {
                 if !parent.isEmpty { return parent }
             }
             return session.cwd
+        }
+        if let override {
+            let trimmed = override.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, fileManager.fileExists(atPath: trimmed) {
+                return trimmed
+            }
         }
         if fileManager.fileExists(atPath: session.cwd) {
             return session.cwd

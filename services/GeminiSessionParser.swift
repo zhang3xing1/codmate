@@ -92,6 +92,12 @@ struct GeminiSessionParser {
       let startedAt = parseDate(record.startTime)
     else { return nil }
 
+    let hasUserOrAssistant = record.messages.contains {
+      let kind = $0.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      return kind == "user" || kind == "gemini"
+    }
+    guard hasUserOrAssistant else { return nil }
+
     let sessionFileId = url.deletingPathExtension().lastPathComponent
     let resumeIdentifier = record.sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
     let sessionId = resumeIdentifier.isEmpty ? sessionFileId : resumeIdentifier

@@ -5,10 +5,12 @@ import Foundation
 extension SessionListViewModel {
     func resume(session: SessionSummary) async -> Result<ProcessResult, Error> {
         do {
+            let cwd = resolvedWorkingDirectory(for: session)
             let result = try await actions.resume(
                 session: session,
                 executableURL: preferredExecutableURL(for: session.source),
-                options: preferences.resumeOptions)
+                options: preferences.resumeOptions,
+                workingDirectory: cwd)
             return .success(result)
         } catch {
             return .failure(error)
@@ -22,11 +24,13 @@ extension SessionListViewModel {
     }
 
     func copyResumeCommands(session: SessionSummary) {
+        let cwd = resolvedWorkingDirectory(for: session)
         actions.copyResumeCommands(
             session: session,
             executableURL: preferredExecutableURL(for: session.source),
             options: preferences.resumeOptions,
-            simplifiedForExternal: true
+            simplifiedForExternal: true,
+            workingDirectory: cwd
         )
     }
 
@@ -49,6 +53,7 @@ extension SessionListViewModel {
         session: SessionSummary,
         destinationApp: TerminalApp? = nil
     ) -> Bool {
+        let cwd = resolvedWorkingDirectory(for: session)
         var warpHint: String? = nil
         if destinationApp == .warp {
             guard let hint = warpResumeTitle(for: session) else { return false }
@@ -62,7 +67,8 @@ extension SessionListViewModel {
                 options: preferences.resumeOptions,
                 simplifiedForExternal: true,
                 destinationApp: destinationApp,
-                titleHint: warpHint
+                titleHint: warpHint,
+                workingDirectory: cwd
             )
             return true
         }
@@ -83,31 +89,38 @@ extension SessionListViewModel {
                 options: preferences.resumeOptions,
                 simplifiedForExternal: true,
                 destinationApp: destinationApp,
-                titleHint: warpHint)
+                titleHint: warpHint,
+                workingDirectory: cwd)
         }
         return true
     }
 
     func openInTerminal(session: SessionSummary) -> Bool {
-        actions.openInTerminal(
+        let cwd = resolvedWorkingDirectory(for: session)
+        return actions.openInTerminal(
             session: session,
             executableURL: preferredExecutableURL(for: session.source),
-            options: preferences.resumeOptions)
+            options: preferences.resumeOptions,
+            workingDirectory: cwd)
     }
 
     func buildResumeCommands(session: SessionSummary) -> String {
-        actions.buildResumeCommandLines(
+        let cwd = resolvedWorkingDirectory(for: session)
+        return actions.buildResumeCommandLines(
             session: session,
             executableURL: preferredExecutableURL(for: session.source),
-            options: preferences.resumeOptions
+            options: preferences.resumeOptions,
+            workingDirectory: cwd
         )
     }
 
     func buildExternalResumeCommands(session: SessionSummary) -> String {
-        actions.buildExternalResumeCommands(
+        let cwd = resolvedWorkingDirectory(for: session)
+        return actions.buildExternalResumeCommands(
             session: session,
             executableURL: preferredExecutableURL(for: session.source),
-            options: preferences.resumeOptions
+            options: preferences.resumeOptions,
+            workingDirectory: cwd
         )
     }
 
@@ -501,7 +514,12 @@ extension SessionListViewModel {
     }
 
     func openWarpLaunch(session: SessionSummary) {
-        _ = actions.openWarpLaunchConfig(session: session, options: preferences.resumeOptions)
+        let cwd = resolvedWorkingDirectory(for: session)
+        _ = actions.openWarpLaunchConfig(
+            session: session,
+            options: preferences.resumeOptions,
+            workingDirectory: cwd
+        )
     }
 
     func openPreferredTerminal(app: TerminalApp) {

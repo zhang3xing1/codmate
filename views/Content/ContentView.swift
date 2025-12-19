@@ -574,10 +574,7 @@ struct ContentView: View {
   }
 
   func workingDirectory(for session: SessionSummary) -> String {
-    if FileManager.default.fileExists(atPath: session.cwd) {
-      return session.cwd
-    }
-    return session.fileURL.deletingLastPathComponent().path
+    viewModel.resolvedWorkingDirectory(for: session)
   }
 
   func projectDirectory(for session: SessionSummary) -> String? {

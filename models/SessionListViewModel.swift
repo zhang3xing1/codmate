@@ -2367,6 +2367,24 @@ final class SessionListViewModel: ObservableObject {
     return summary.cwd
   }
 
+  func resolvedWorkingDirectory(for summary: SessionSummary) -> String {
+    let candidate: String
+    if summary.source.baseKind == .gemini && !summary.isRemote {
+      candidate = displayWorkingDirectory(for: summary)
+    } else {
+      candidate = summary.cwd
+    }
+    let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !trimmed.isEmpty, FileManager.default.fileExists(atPath: trimmed) {
+      return trimmed
+    }
+    if FileManager.default.fileExists(atPath: summary.cwd) {
+      return summary.cwd
+    }
+    let fallback = summary.fileURL.deletingLastPathComponent().path
+    return fallback.isEmpty ? NSHomeDirectory() : fallback
+  }
+
   private func currentScope() -> SessionLoadScope {
     switch dateDimension {
     case .created:

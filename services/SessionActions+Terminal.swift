@@ -2,18 +2,31 @@ import AppKit
 import Foundation
 
 extension SessionActions {
-    func openInTerminal(session: SessionSummary, executableURL: URL, options: ResumeOptions) -> Bool
+    func openInTerminal(
+        session: SessionSummary,
+        executableURL: URL,
+        options: ResumeOptions,
+        workingDirectory: String? = nil
+    ) -> Bool
     {
         #if APPSTORE
         // App Store build: avoid Apple Events. Copy command and open Terminal at directory.
-        copyResumeCommands(session: session, executableURL: executableURL, options: options)
-        let cwd = FileManager.default.fileExists(atPath: session.cwd) ? session.cwd : session.fileURL.deletingLastPathComponent().path
+        copyResumeCommands(
+            session: session,
+            executableURL: executableURL,
+            options: options,
+            workingDirectory: workingDirectory
+        )
+        let cwd = self.workingDirectory(for: session, override: workingDirectory)
         _ = openAppleTerminal(at: cwd)
         return true
         #else
         let scriptText = {
             let lines = buildResumeCommandLines(
-                session: session, executableURL: executableURL, options: options
+                session: session,
+                executableURL: executableURL,
+                options: options,
+                workingDirectory: workingDirectory
             )
             .replacingOccurrences(of: "\n", with: "; ")
             return """
@@ -135,10 +148,12 @@ extension SessionActions {
 
     // MARK: - Warp Launch Configuration
     @discardableResult
-    func openWarpLaunchConfig(session: SessionSummary, options: ResumeOptions) -> Bool {
-        let cwd =
-            FileManager.default.fileExists(atPath: session.cwd)
-            ? session.cwd : session.fileURL.deletingLastPathComponent().path
+    func openWarpLaunchConfig(
+        session: SessionSummary,
+        options: ResumeOptions,
+        workingDirectory: String? = nil
+    ) -> Bool {
+        let cwd = self.workingDirectory(for: session, override: workingDirectory)
         let home = FileManager.default.homeDirectoryForCurrentUser
         let folder = home.appendingPathComponent(".warp", isDirectory: true)
             .appendingPathComponent("launch_configurations", isDirectory: true)
@@ -172,7 +187,7 @@ extension SessionActions {
                         commands:
                           - exec: codex \(flagsString)
             """
-        do { try yaml.data(using: .utf8)?.write(to: fileURL) } catch {}
+        do { try yaml.data(using: String.Encoding.utf8)?.write(to: fileURL) } catch {}
 
         // Prefer warp://launch/<config_name> (Warp resolves in its config dir), fallback to absolute path.
         if let urlByName = URL(string: "warp://launch/\(baseName)") {

@@ -59,7 +59,8 @@ extension ContentView {
                         viewModel.reveal(session: current)
                     },
                     onDelete: presentDeleteConfirmation,
-                    columnVisibility: $columnVisibility
+                    columnVisibility: $columnVisibility,
+                    preferences: preferences
                 )
                 .environmentObject(viewModel)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -89,7 +90,8 @@ extension ContentView {
                         viewModel.reveal(session: current)
                     },
                     onDelete: presentDeleteConfirmation,
-                    columnVisibility: $columnVisibility
+                    columnVisibility: $columnVisibility,
+                    preferences: preferences
                 )
                 .environmentObject(viewModel)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -114,7 +116,8 @@ extension ContentView {
                         viewModel.reveal(session: current)
                     },
                     onDelete: presentDeleteConfirmation,
-                    columnVisibility: $columnVisibility
+                    columnVisibility: $columnVisibility,
+                    preferences: preferences
                 )
                 .environmentObject(viewModel)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

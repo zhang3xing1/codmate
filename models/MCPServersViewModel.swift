@@ -1,7 +1,6 @@
 import Foundation
 import SwiftUI
 
-@available(macOS 15.0, *)
 @MainActor
 final class MCPServersViewModel: ObservableObject {
     enum Tab: Hashable { case importWizard, servers, advanced }

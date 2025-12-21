@@ -283,7 +283,6 @@ private struct UsageStatusPopover: View {
   @Binding var selectedProvider: UsageProviderKind
   var onRequestRefresh: (UsageProviderKind) -> Void
 
-  @Environment(\.colorScheme) private var colorScheme
   @State private var didTriggerClaudeAutoRefresh = false
 
   var body: some View {
@@ -362,35 +361,7 @@ private struct UsageStatusPopover: View {
 
   @ViewBuilder
   private func providerIcon(for provider: UsageProviderKind) -> some View {
-    if let name = iconName(for: provider) {
-      Image(name)
-        .resizable()
-        .interpolation(.high)
-        .aspectRatio(contentMode: .fit)
-        .frame(width: 12, height: 12)
-        .clipShape(RoundedRectangle(cornerRadius: 2))
-        .modifier(DarkModeInvertModifier(active: provider == .codex && colorScheme == .dark))
-    } else {
-      Circle()
-        .fill(accent(for: provider))
-        .frame(width: 9, height: 9)
-    }
-  }
-
-  private func iconName(for provider: UsageProviderKind) -> String? {
-    switch provider {
-    case .codex: return "ChatGPTIcon"
-    case .claude: return "ClaudeIcon"
-    case .gemini: return "GeminiIcon"
-    }
-  }
-
-  private func accent(for provider: UsageProviderKind) -> Color {
-    switch provider {
-    case .codex: return Color.accentColor
-    case .claude: return Color(nsColor: .systemPurple)
-    case .gemini: return Color(nsColor: .systemTeal)
-    }
+    ProviderIconView(provider: provider, size: 12, cornerRadius: 2)
   }
 }
 

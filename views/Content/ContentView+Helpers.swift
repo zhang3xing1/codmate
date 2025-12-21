@@ -185,7 +185,7 @@ extension ContentView {
                 visibleKinds: builderKinds,
                 exportURL: url
             )
-            try? md.data(using: .utf8)?.write(to: url)
+            try? md.data(using: String.Encoding.utf8)?.write(to: url)
         }
     }
 

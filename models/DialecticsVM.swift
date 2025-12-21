@@ -2,7 +2,6 @@ import Foundation
 import SwiftUI
 import AppKit
 
-@available(macOS 15.0, *)
 @MainActor
 final class DialecticsVM: ObservableObject {
     @Published var sessions: SessionsDiagnostics? = nil

@@ -6,6 +6,7 @@ struct SessionSourceBranding {
   let iconColor: Color
   let badgeBackground: Color
   let badgeAssetName: String?
+  let providerKind: UsageProviderKind
 }
 
 extension SessionSource {
@@ -23,7 +24,8 @@ extension SessionSource {
         symbolName: "sparkles",
         iconColor: Color.accentColor,
         badgeBackground: Color.accentColor.opacity(0.08),
-        badgeAssetName: "ChatGPTIcon"
+        badgeAssetName: "ChatGPTIcon",
+        providerKind: .codex
       )
     case .codexRemote(let host):
       return SessionSourceBranding(
@@ -31,7 +33,8 @@ extension SessionSource {
         symbolName: "sparkles",
         iconColor: Color.accentColor,
         badgeBackground: Color.accentColor.opacity(0.08),
-        badgeAssetName: "ChatGPTIcon"
+        badgeAssetName: "ChatGPTIcon",
+        providerKind: .codex
       )
     case .claudeLocal:
       return SessionSourceBranding(
@@ -39,7 +42,8 @@ extension SessionSource {
         symbolName: "cloud.fill",
         iconColor: Color.purple,
         badgeBackground: Color.purple.opacity(0.10),
-        badgeAssetName: "ClaudeIcon"
+        badgeAssetName: "ClaudeIcon",
+        providerKind: .claude
       )
     case .claudeRemote(let host):
       return SessionSourceBranding(
@@ -47,7 +51,8 @@ extension SessionSource {
         symbolName: "cloud.fill",
         iconColor: Color.purple,
         badgeBackground: Color.purple.opacity(0.10),
-        badgeAssetName: "ClaudeIcon"
+        badgeAssetName: "ClaudeIcon",
+        providerKind: .claude
       )
     case .geminiLocal:
       return SessionSourceBranding(
@@ -55,7 +60,8 @@ extension SessionSource {
         symbolName: "sparkles.rectangle.stack.fill",
         iconColor: Color.blue,
         badgeBackground: Color.blue.opacity(0.1),
-        badgeAssetName: "GeminiIcon"
+        badgeAssetName: "GeminiIcon",
+        providerKind: .gemini
       )
     case .geminiRemote(let host):
       return SessionSourceBranding(
@@ -63,7 +69,8 @@ extension SessionSource {
         symbolName: "sparkles.rectangle.stack.fill",
         iconColor: Color.blue,
         badgeBackground: Color.blue.opacity(0.1),
-        badgeAssetName: "GeminiIcon"
+        badgeAssetName: "GeminiIcon",
+        providerKind: .gemini
       )
     }
   }

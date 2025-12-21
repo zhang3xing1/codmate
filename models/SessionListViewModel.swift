@@ -218,6 +218,17 @@ final class SessionListViewModel: ObservableObject {
   private var calendarRefreshTasks: [String: Task<Void, Never>] = [:]
   private var cancellables = Set<AnyCancellable>()
   private let pathTreeStore = PathTreeStore()
+  private var timelineCache: [String: TimelineCacheEntry] = [:]
+
+  private struct TimelineCacheEntry {
+    let signature: TimelineCacheSignature
+    let turns: [ConversationTurn]
+  }
+
+  private struct TimelineCacheSignature: Equatable {
+    let modifiedAt: Date?
+    let fileSize: UInt64?
+  }
   private var lastPathCounts: [String: Int] = [:]
   private let sidebarStatsDebounceNanoseconds: UInt64 = 150_000_000
   private let filterDebounceNanoseconds: UInt64 = 15_000_000
@@ -3627,6 +3638,31 @@ extension SessionListViewModel {
     }
     let loader = SessionTimelineLoader()
     return (try? loader.load(url: summary.fileURL)) ?? []
+  }
+
+  // MARK: - Timeline Cache (in-memory)
+
+  func cachedTimeline(for summary: SessionSummary) async -> [ConversationTurn]? {
+    guard let entry = timelineCache[summary.id] else { return nil }
+    let signature = timelineCacheSignature(for: summary)
+    guard entry.signature == signature else { return nil }
+    return entry.turns
+  }
+
+  func storeTimeline(_ turns: [ConversationTurn], for summary: SessionSummary) async {
+    let signature = timelineCacheSignature(for: summary)
+    timelineCache[summary.id] = TimelineCacheEntry(signature: signature, turns: turns)
+  }
+
+  private func timelineCacheSignature(for summary: SessionSummary) -> TimelineCacheSignature {
+    // Prefer on-disk metadata for local sessions; fall back to summary hints.
+    if !summary.source.isRemote,
+       let attrs = try? FileManager.default.attributesOfItem(atPath: summary.fileURL.path) {
+      let mtime = attrs[.modificationDate] as? Date
+      let size = (attrs[.size] as? NSNumber)?.uint64Value
+      return TimelineCacheSignature(modifiedAt: mtime, fileSize: size)
+    }
+    return TimelineCacheSignature(modifiedAt: summary.lastUpdatedAt, fileSize: summary.fileSizeBytes)
   }
 
   // MARK: - Timeline Previews

@@ -11,6 +11,7 @@ struct SessionDetailView: View {
     @Binding var columnVisibility: NavigationSplitViewVisibility
 
     @EnvironmentObject private var viewModel: SessionListViewModel
+    @ObservedObject var preferences: SessionPreferencesStore
     @State private var turns: [ConversationTurn] = []  // filtered + sorted for display
     @State private var allTurns: [ConversationTurn] = []  // raw full timeline
     @State private var loadingTimeline = false
@@ -19,10 +20,11 @@ struct SessionDetailView: View {
     @State private var autoExpandVisible = false
     @State private var searchText: String = ""
     @State private var expandAllOnSearch = false
-    @State private var sortAscending: Bool = false
+    @State private var nowModeEnabled = true  // Auto-scroll to bottom when enabled
     @State private var inlineFiltersExpanded = false
     @State private var sessionVisibleKinds: Set<MessageVisibilityKind> = MessageVisibilityKind.timelineDefault
     @State private var hasSessionVisibleKindsOverride = false
+    @Environment(\.openWindow) private var openWindow
     @State private var monitor: DirectoryMonitor? = nil
     @State private var debounceReloadTask: Task<Void, Never>? = nil
     @State private var filterTask: Task<Void, Never>? = nil
@@ -68,8 +70,7 @@ struct SessionDetailView: View {
         }
         .task(id: summary.id) { await initialLoadAndMonitor() }
         .onChange(of: searchText, initial: true) { _ in applyFilterAndSort() }
-        .onChange(of: sortAscending, initial: true) { _ in applyFilterAndSort() }
-        .onChange(of: viewModel.preferences.timelineVisibleKinds, initial: true) { newValue in
+        .onChange(of: preferences.timelineVisibleKinds, initial: true) { newValue in
             guard !hasSessionVisibleKindsOverride else { return }
             sessionVisibleKinds = newValue
             applyFilterAndSort()
@@ -275,34 +276,48 @@ struct SessionDetailView: View {
             conversationSearchField
 
             Button {
-                withAnimation(.easeInOut(duration: 0.16)) {
-                    inlineFiltersExpanded.toggle()
-                }
+                openWindow(id: "settings")
             } label: {
                 Label(
                     "Filters",
-                    systemImage: hasSessionVisibleKindsOverride
-                        ? "line.3.horizontal.decrease.circle.fill"
-                        : "line.3.horizontal.decrease.circle"
+                    systemImage: "line.3.horizontal.decrease.circle"
                 )
                 .font(.callout)
             }
             .buttonStyle(.borderless)
-            .help("Filter message types for this session")
+            .help("Open Settings to configure message type filters")
             .hoverHand()
 
-            // Sort order toggle
+            // Now mode toggle (mimics Console.app)
             Button {
-                sortAscending.toggle()
+                nowModeEnabled.toggle()
             } label: {
-                Label(
-                    sortAscending ? "Oldest First" : "Newest First",
-                    systemImage: sortAscending ? "arrow.up" : "arrow.down"
-                )
+                Label {
+                    Text("Now")
+                } icon: {
+                    ZStack {
+                        // Background circle
+                        Circle()
+                            .fill(nowModeEnabled ? Color.primary : Color.clear)
+                            .frame(width: 14, height: 14)
+
+                        // Border circle (only visible when disabled)
+                        if !nowModeEnabled {
+                            Circle()
+                                .strokeBorder(Color.primary, lineWidth: 1.5)
+                                .frame(width: 14, height: 14)
+                        }
+
+                        // Arrow icon
+                        Image(systemName: "arrow.up.backward")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundColor(nowModeEnabled ? Color(nsColor: .controlBackgroundColor) : Color.primary)
+                    }
+                }
                 .font(.callout)
             }
             .buttonStyle(.borderless)
-            .help(sortAscending ? "Sort oldest → newest" : "Sort newest → oldest")
+            .help(nowModeEnabled ? "Auto-scroll to latest (Now mode enabled)" : "Enable auto-scroll to latest")
             .hoverHand()
 
             Button {
@@ -395,10 +410,14 @@ struct SessionDetailView: View {
                     ConversationTimelineView(
                         turns: turns,
                         expandedTurnIDs: $expandedTurnIDs,
-                        ascending: sortAscending,
+                        ascending: true,  // Fixed: oldest first (newest at bottom)
                         branding: summary.source.branding,
                         allowManualToggle: !autoExpandVisible,
-                        autoExpandVisible: autoExpandVisible
+                        autoExpandVisible: autoExpandVisible,
+                        nowModeEnabled: nowModeEnabled,
+                        onNowModeChange: { newValue in
+                            nowModeEnabled = newValue
+                        }
                     )
                     .id(autoExpandVisible)
                 }
@@ -525,25 +544,19 @@ extension SessionDetailView {
     private var visibilityGroups: [VisibilityGroup] {
         [
             VisibilityGroup(title: "Core", items: [
-                VisibilityItem(kind: .user, title: "User"),
-                VisibilityItem(kind: .assistant, title: "Assistant"),
-                VisibilityItem(kind: .tool, title: "Tool")
+                VisibilityItem(kind: .user, title: MessageVisibilityKind.user.settingsLabel),
+                VisibilityItem(kind: .assistant, title: MessageVisibilityKind.assistant.settingsLabel)
             ]),
-            VisibilityGroup(title: "Reasoning & Tokens", items: [
-                VisibilityItem(kind: .reasoning, title: "Reasoning"),
-                VisibilityItem(kind: .tokenUsage, title: "Token Usage")
+            VisibilityGroup(title: "Reasoning & Edits", items: [
+                VisibilityItem(kind: .reasoning, title: MessageVisibilityKind.reasoning.settingsLabel),
+                VisibilityItem(kind: .codeEdit, title: MessageVisibilityKind.codeEdit.settingsLabel)
             ]),
-            VisibilityGroup(title: "Environment", items: [
-                VisibilityItem(kind: .environmentContext, title: "Environment Context"),
-                VisibilityItem(kind: .turnContext, title: "Turn Context")
+            VisibilityGroup(title: "Tools & Tokens", items: [
+                VisibilityItem(kind: .tool, title: MessageVisibilityKind.tool.settingsLabel),
+                VisibilityItem(kind: .tokenUsage, title: MessageVisibilityKind.tokenUsage.settingsLabel)
             ]),
             VisibilityGroup(title: "Other Info", items: [
-                VisibilityItem(kind: .sessionMeta, title: "Session Meta"),
-                VisibilityItem(kind: .taskInstructions, title: "Task Instructions"),
-                VisibilityItem(kind: .compaction, title: "Compaction"),
-                VisibilityItem(kind: .turnAborted, title: "Turn Aborted"),
-                VisibilityItem(kind: .ghostSnapshot, title: "Ghost Snapshot"),
-                VisibilityItem(kind: .infoOther, title: "Other Info")
+                VisibilityItem(kind: .infoOther, title: MessageVisibilityKind.infoOther.settingsLabel)
             ])
         ]
     }
@@ -566,7 +579,7 @@ extension SessionDetailView {
 
     private func resetInlineFilters() {
         hasSessionVisibleKindsOverride = false
-        sessionVisibleKinds = viewModel.preferences.timelineVisibleKinds
+        sessionVisibleKinds = preferences.timelineVisibleKinds
         Task { await viewModel.clearTimelineVisibleKindsOverride(for: summary.id) }
         applyFilterAndSort()
     }
@@ -574,7 +587,7 @@ extension SessionDetailView {
     // MARK: - Loading helpers
     private func initialLoadAndMonitor() async {
         let override = viewModel.timelineVisibleKindsOverride(for: summary.id)
-        sessionVisibleKinds = override ?? viewModel.preferences.timelineVisibleKinds
+        sessionVisibleKinds = override ?? preferences.timelineVisibleKinds
         hasSessionVisibleKindsOverride = override != nil
         autoExpandVisible = false
         expandedTurnIDs.removeAll()
@@ -666,8 +679,7 @@ extension SessionDetailView {
         filterTask?.cancel()
         let term = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let all = allTurns
-        let kinds = sessionVisibleKinds
-        let sortAscending = sortAscending
+        let kinds = effectiveVisibleKinds
         let expandOnSearch = expandAllOnSearch
 
         filterTask = Task.detached(priority: .userInitiated) {
@@ -678,9 +690,8 @@ extension SessionDetailView {
                 }
             }
             filtered = filtered.filtering(visibleKinds: kinds)
-            filtered.sort { a, b in
-                sortAscending ? (a.timestamp < b.timestamp) : (a.timestamp > b.timestamp)
-            }
+            // Fixed: always sort oldest first (newest at bottom)
+            filtered.sort { a, b in a.timestamp < b.timestamp }
             let result = filtered
             await MainActor.run {
                 turns = result
@@ -693,6 +704,15 @@ extension SessionDetailView {
         }
     }
 
+    private var effectiveVisibleKinds: Set<MessageVisibilityKind> {
+        if hasSessionVisibleKindsOverride {
+            return sessionVisibleKinds
+                .intersection(preferences.timelineVisibleKinds)
+                .subtracting([.turnContext])
+        }
+        return preferences.timelineVisibleKinds.subtracting([.turnContext])
+    }
+
     private func exportMarkdown() {
         let panel = NSSavePanel()
         panel.title = "Export Markdown"
@@ -703,10 +723,10 @@ extension SessionDetailView {
             let md = MarkdownExportBuilder.build(
                 session: summary,
                 turns: allTurns,
-                visibleKinds: viewModel.preferences.markdownVisibleKinds,
+                visibleKinds: preferences.markdownVisibleKinds,
                 exportURL: url
             )
-            try? md.data(using: .utf8)?.write(to: url)
+            try? md.data(using: String.Encoding.utf8)?.write(to: url)
         }
     }
 
@@ -755,6 +775,7 @@ private struct SessionDetailPreviewContainer: View {
         SessionDetailView(
             summary: summary,
             isProcessing: isProcessing,
+            preferences: SessionPreferencesStore(),
             onResume: { print("Resume session") },
             onReveal: { print("Reveal in Finder") },
             onDelete: { print("Delete session") },
@@ -820,7 +841,7 @@ private struct ConversationTurnPreviewCard: View {
                 }
 
                 if preview.hasThinking {
-                    Label("Thinking", systemImage: "brain")
+                    Label(MessageVisibilityKind.reasoning.settingsLabel, systemImage: "brain")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .labelStyle(.iconOnly)

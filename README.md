@@ -6,7 +6,7 @@ CodMate is a macOS SwiftUI app for **managing CLI AI sessions**: browse, search,
 
 It focuses on speed (incremental indexing + caching), a compact three-column UI, and “ship it” workflows like **Project Review (Git Changes)** and **one-click Resume/New**.
 
-Status: **macOS 15+**, **Swift 6**, **Xcode 16**. Universal binary (arm64 + x86_64).
+Status: **macOS 13.5+**, **Swift 6**, **Xcode 16**. Universal binary (arm64 + x86_64).
 
 ## Download
 - **Latest release (DMG)**: [GitHub Releases](https://github.com/loocor/CodMate/releases/latest)
@@ -121,7 +121,7 @@ Status: **macOS 15+**, **Swift 6**, **Xcode 16**. Universal binary (arm64 + x86_
 - Sidebar statistics are global and decoupled from the list scope to keep navigation snappy.
 
 ## Architecture
-- App: macOS SwiftUI (min macOS 15). Xcode project `CodMate.xcodeproj` and SwiftPM manifest.
+- App: macOS SwiftUI (min macOS 13.5). Xcode project `CodMate.xcodeproj` and SwiftPM manifest.
 - MVVM layering
   - Models: `SessionSummary`, `SessionEvent`, `DateDimension`, `SessionLoadScope`, …
   - Services: `SessionIndexer`, `SessionCacheStore`, `SessionActions`, `SessionTimelineLoader`, `CodexConfigService`, `SessionsDiagnosticsService`
@@ -134,7 +134,7 @@ Status: **macOS 15+**, **Swift 6**, **Xcode 16**. Universal binary (arm64 + x86_
 
 ## Build
 Prerequisites
-- macOS 15+, Xcode 16 (or Swift 6 toolchain). Install the CLIs you use (Codex / Claude / Gemini) somewhere on your `PATH`.
+- macOS 13.5+, Xcode 16 (or Swift 6 toolchain). Install the CLIs you use (Codex / Claude / Gemini) somewhere on your `PATH`.
 
 Option A — Xcode
 - Open `CodMate.xcodeproj`, select the “CodMate” scheme, destination “My Mac”, then Run or Archive.

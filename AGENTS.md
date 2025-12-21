@@ -5,7 +5,7 @@ Purpose
 - Scope: applies to the entire repo. Prefer macOS SwiftUI/AppKit APIs; avoid iOS‑only placements or components.
 
 Architecture
-- App type: macOS SwiftUI app (min macOS 15). SwiftPM for sources + hand‑crafted Xcode project `CodMate.xcodeproj` for running/debugging.
+- App type: macOS SwiftUI app (min macOS 13.5). SwiftPM for sources + hand‑crafted Xcode project `CodMate.xcodeproj` for running/debugging.
 - Layering (MVVM):
   - Models: pure data structures (SessionSummary, SessionEvent, DateDimension, SessionLoadScope, …)
   - Services: IO and side effects (SessionIndexer, SessionCacheStore, SessionActions, SessionTimelineLoader, LLMClient)
@@ -14,7 +14,7 @@ Architecture
 
 UI Rules (macOS specific)
 - Use macOS SwiftUI and AppKit bridges; do NOT use iOS‑only placements such as `.navigationBarTrailing`.
-- Settings uses macOS 15's new TabView API (`Tab("…", systemImage: "…")`) to split into multiple tabs; container padding is unified (horizontal 16pt, top 16pt).
+- Settings uses macOS 15's new TabView API (`Tab("…", systemImage: "…")`) when available; provide a macOS 13.5/14 fallback with `tabItem` + `tag`. Container padding is unified (horizontal 16pt, top 16pt).
   - Tab content uniformly uses `SettingsTabContent` container (top-aligned, overall 8pt padding) to ensure consistent layout and spacing across pages.
 - Providers has been separated from the Codex tab into a top-level Settings page: Settings › Providers manages global providers and Codex/Claude bindings; Settings › Codex only retains Runtime/Notifications/Privacy/Raw Config (no longer includes Providers).
   - Built-in providers are auto-loaded from an app-bundled `payload/providers.json` (managedByCodMate=true). This avoids hardcoding and lets users simply provide API keys; base URLs/models come pre-filled. The list merges bundled entries with `~/.codmate/providers.json` (user overrides win).
@@ -48,7 +48,8 @@ UI Rules (macOS specific)
     - Repository authorization is on-demand: when opening Review, the app resolves the repository root (the folder containing `.git`) and, if needed, prompts the user with an NSOpenPanel to authorize that folder via a security-scoped bookmark. The Settings page no longer lists authorized repositories; authorization and revoke are managed inline in the Review header.
   - “Task Instructions” uses a DisclosureGroup; load lazily when expanded.
   - Conversation timeline uses LazyVStack; differentiate user/assistant/tool/info bubbles.
-  - Timeline & Markdown visibility: Settings › General provides per-surface checkboxes to choose which message types are shown in the conversation timeline and included when exporting Markdown. Defaults: Timeline shows all except Environment Context (which has its own section); Markdown includes only User and Assistant.
+- Timeline & Markdown visibility: Settings › General provides per-surface checkboxes to choose which message types are shown in the conversation timeline and included when exporting Markdown. Defaults: Timeline shows User, Assistant, Reasoning, and Code Edit; Tool Invocation, Token Usage, and Other Info are off by default. Markdown includes only User and Assistant. Environment Context and Turn Context are surfaced in dedicated sections and not configurable; Task Instructions remain in the detail DisclosureGroup; Ghost Snapshot is ignored. Code edits are surfaced as their own message type (extracted from tool calls) and have a separate toggle.
+  - Turn Context is surfaced in the Environment Context card and is not exposed as a separate toggle or timeline item.
   - Context menu in list rows adds: “Generate Title & 100-char Summary” to run LLM on-demand for the selected session.
 - Embedded Terminal: One live shell per session when resumed in-app; switching sessions in the middle list switches the attached terminal. The shell keeps running when you navigate away. “Return to history” closes the running shell for the focused session.
   - Prompt picker: When embedded terminal is running, a Prompts button opens a searchable list. Prompts are merged from per-project `.codmate/prompts.json` (if present) and `~/.codmate/prompts.json` (user), de-duplicated by command, then layered with a few built‑ins. Items accept either `{ "label": "…", "command": "…" }` or a plain string (used for both). Selection inserts into the terminal input without executing. The header wrench button opens the preferred file (project if exists, else user). Typing a new command shows “Add …” to create a prompt in the preferred file. Deleting a built‑in prompt records it in a hidden list (`prompts-hidden.json` at project if project prompts exist, else at user), which suppresses that built‑in in the UI.

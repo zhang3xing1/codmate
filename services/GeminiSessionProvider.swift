@@ -621,6 +621,7 @@ actor GeminiSessionProvider {
         message: text,
         kind: nil,
         text: text,
+        reason: nil,
         info: nil,
         rateLimits: nil
       )
@@ -688,6 +689,7 @@ actor GeminiSessionProvider {
       message: payload.message,
       kind: payload.kind,
       text: payload.text,
+      reason: payload.reason,
       info: metadata.isEmpty ? nil : .object(metadata),
       rateLimits: payload.rateLimits
     )

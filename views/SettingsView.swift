@@ -226,7 +226,7 @@ struct SettingsView: View {
         }
 
         VStack(alignment: .leading, spacing: 10) {
-          Text("Timeline & Markdown").font(.headline).fontWeight(.semibold)
+          Text("Message Types").font(.headline).fontWeight(.semibold)
           settingsCard {
             messageTypeVisibilitySection()
           }
@@ -301,64 +301,93 @@ struct SettingsView: View {
   // MARK: - Message Type Visibility Section
   @ViewBuilder
   private func messageTypeVisibilitySection() -> some View {
-    VStack(alignment: .leading, spacing: 8) {
-      VStack(alignment: .leading, spacing: 0) {
-        HStack(alignment: .firstTextBaseline) {
-          Label("Message Type", systemImage: "text.bubble")
-            .font(.subheadline).fontWeight(.medium)
-          Spacer(minLength: 8)
-          Button("Restore Defaults") {
+    VStack(alignment: .leading, spacing: 16) {
+
+      // Timeline visibility section
+      VStack(alignment: .leading, spacing: 8) {
+        HStack {
+          Image(systemName: "eye")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+          Text("Timeline visibility")
+            .font(.subheadline)
+            .fontWeight(.medium)
+          Spacer()
+          Button(action: {
             preferences.timelineVisibleKinds = MessageVisibilityKind.timelineDefault
-            preferences.markdownVisibleKinds = MessageVisibilityKind.markdownDefault
+          }) {
+            Image(systemName: "arrow.counterclockwise.circle.fill")
+              .font(.subheadline)
+              .foregroundStyle(.secondary)
           }
-          .buttonStyle(.bordered)
+          .buttonStyle(.plain)
+          .frame(width: 24, height: 24)
+          .help("Restore timeline visibility to defaults")
         }
-        Text("Choose which message types appear in Timeline and Markdown export")
-          .font(.caption).foregroundColor(.secondary)
+        Text("Choose which message types appear in the conversation timeline")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+
+        messageTypeGrid(for: $preferences.timelineVisibleKinds)
       }
 
-      Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-        GridRow {
-          Text("Message Type")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-          Text("Timeline Visibility")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-          Text("Markdown Export")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
+      Divider()
 
-        GridRow {
-          Divider().gridCellColumns(3)
-        }
-
-        ForEach(messageTypeRows) { row in
-          GridRow {
-            Text(row.title)
+      // Markdown export section
+      VStack(alignment: .leading, spacing: 8) {
+        HStack {
+          Image(systemName: "doc.text")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+          Text("Markdown export")
+            .font(.subheadline)
+            .fontWeight(.medium)
+          Spacer()
+          Button(action: {
+            preferences.markdownVisibleKinds = MessageVisibilityKind.markdownDefault
+          }) {
+            Image(systemName: "arrow.counterclockwise.circle.fill")
               .font(.subheadline)
-            if let kind = row.kind {
-              Toggle("", isOn: binding($preferences.timelineVisibleKinds, kind))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
-            } else {
-              Color.clear.frame(width: 36, height: 20)
-            }
-            if let kind = row.kind {
-              Toggle("", isOn: binding($preferences.markdownVisibleKinds, kind))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
-            } else {
-              Color.clear.frame(width: 36, height: 20)
-            }
+              .foregroundStyle(.secondary)
+          }
+          .buttonStyle(.plain)
+          .frame(width: 24, height: 24)
+          .help("Restore markdown export to defaults")
+        }
+        Text("Choose which message types are included when exporting Markdown")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+
+        messageTypeGrid(for: $preferences.markdownVisibleKinds)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  @ViewBuilder
+  private func messageTypeGrid(for selection: Binding<Set<MessageVisibilityKind>>) -> some View {
+    let columns = [
+      GridItem(.flexible(), spacing: 12),
+      GridItem(.flexible(), spacing: 12),
+      GridItem(.flexible(), spacing: 12),
+      GridItem(.flexible(), spacing: 12),
+    ]
+
+    LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
+      ForEach(messageTypeRows) { row in
+        if let kind = row.kind {
+          HStack(spacing: 6) {
+            Toggle("", isOn: binding(selection, kind))
+              .labelsHidden()
+              .toggleStyle(.switch)
+              .controlSize(.small)
+            Text(row.title)
+              .font(.caption)
+              .fixedSize(horizontal: false, vertical: true)
           }
         }
       }
     }
-    .frame(maxWidth: .infinity, alignment: .leading)
   }
 
   private func binding(
@@ -384,19 +413,27 @@ struct SettingsView: View {
 
   private var messageTypeRows: [MessageTypeRow] {
     [
-      MessageTypeRow(id: MessageVisibilityKind.user.rawValue, title: "User Message", kind: .user, level: 0, isGroup: false),
-      MessageTypeRow(id: MessageVisibilityKind.assistant.rawValue, title: "Assistant Message", kind: .assistant, level: 0, isGroup: false),
-      MessageTypeRow(id: MessageVisibilityKind.tool.rawValue, title: "Tool Invocation", kind: .tool, level: 0, isGroup: false),
-      MessageTypeRow(id: MessageVisibilityKind.reasoning.rawValue, title: "Reasoning", kind: .reasoning, level: 0, isGroup: false),
-      MessageTypeRow(id: MessageVisibilityKind.tokenUsage.rawValue, title: "Token Usage", kind: .tokenUsage, level: 0, isGroup: false),
-      MessageTypeRow(id: MessageVisibilityKind.environmentContext.rawValue, title: "Environment Context", kind: .environmentContext, level: 0, isGroup: false),
-      MessageTypeRow(id: MessageVisibilityKind.turnContext.rawValue, title: "Turn Context", kind: .turnContext, level: 0, isGroup: false),
-      MessageTypeRow(id: MessageVisibilityKind.sessionMeta.rawValue, title: "Session Meta", kind: .sessionMeta, level: 0, isGroup: false),
-      MessageTypeRow(id: MessageVisibilityKind.taskInstructions.rawValue, title: "Task Instructions", kind: .taskInstructions, level: 0, isGroup: false),
-      MessageTypeRow(id: MessageVisibilityKind.compaction.rawValue, title: "Compaction", kind: .compaction, level: 0, isGroup: false),
-      MessageTypeRow(id: MessageVisibilityKind.turnAborted.rawValue, title: "Turn Aborted", kind: .turnAborted, level: 0, isGroup: false),
-      MessageTypeRow(id: MessageVisibilityKind.ghostSnapshot.rawValue, title: "Ghost Snapshot", kind: .ghostSnapshot, level: 0, isGroup: false),
-      MessageTypeRow(id: MessageVisibilityKind.infoOther.rawValue, title: "Other Info", kind: .infoOther, level: 0, isGroup: false)
+      MessageTypeRow(
+        id: MessageVisibilityKind.user.rawValue, title: MessageVisibilityKind.user.settingsLabel, kind: .user, level: 0,
+        isGroup: false),
+      MessageTypeRow(
+        id: MessageVisibilityKind.assistant.rawValue, title: MessageVisibilityKind.assistant.settingsLabel, kind: .assistant,
+        level: 0, isGroup: false),
+      MessageTypeRow(
+        id: MessageVisibilityKind.reasoning.rawValue, title: MessageVisibilityKind.reasoning.settingsLabel, kind: .reasoning,
+        level: 0, isGroup: false),
+      MessageTypeRow(
+        id: MessageVisibilityKind.codeEdit.rawValue, title: MessageVisibilityKind.codeEdit.settingsLabel, kind: .codeEdit,
+        level: 0, isGroup: false),
+      MessageTypeRow(
+        id: MessageVisibilityKind.tool.rawValue, title: MessageVisibilityKind.tool.settingsLabel, kind: .tool, level: 0,
+        isGroup: false),
+      MessageTypeRow(
+        id: MessageVisibilityKind.tokenUsage.rawValue, title: MessageVisibilityKind.tokenUsage.settingsLabel, kind: .tokenUsage,
+        level: 0, isGroup: false),
+      MessageTypeRow(
+        id: MessageVisibilityKind.infoOther.rawValue, title: MessageVisibilityKind.infoOther.settingsLabel, kind: .infoOther,
+        level: 0, isGroup: false),
     ]
   }
 

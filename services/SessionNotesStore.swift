@@ -6,6 +6,7 @@ struct SessionNote: Codable, Hashable, Sendable {
     var comment: String?
     var projectId: String?
     var profileId: String?
+    var timelineVisibleKinds: [String]? = nil
     var updatedAt: Date
 }
 
@@ -35,6 +36,8 @@ actor SessionNotesStore {
         try? fm.createDirectory(at: self.notesRoot, withIntermediateDirectories: true)
         // During init, actor isolation isn't available; use static helper for old single-file JSON
         Self.performMigration(fm: fm, notesRoot: self.notesRoot, legacyURL: self.legacyURL)
+        // Normalize stored timeline visibility settings to current schema.
+        Self.normalizeTimelineVisibilityIfNeeded(fm: fm, notesRoot: self.notesRoot)
     }
 
     // Compute default notes directory from sessions root
@@ -91,6 +94,16 @@ actor SessionNotesStore {
         }
     }
 
+    func updateTimelineVisibleKinds(id: String, kinds: [String]?) {
+        var note = (note(for: id) ?? SessionNote(id: id, title: nil, comment: nil, projectId: nil, profileId: nil, updatedAt: Date()))
+        note.timelineVisibleKinds = kinds
+        note.updatedAt = Date()
+        if let data = try? JSONEncoder().encode(note) {
+            let url = fileURL(for: id)
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
     func all() -> [String: SessionNote] {
         var result: [String: SessionNote] = [:]
         guard let en = fm.enumerator(at: notesRoot, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
@@ -125,6 +138,40 @@ actor SessionNotesStore {
             }
         }
         // Keep legacy file as-is; do not delete to avoid destructive surprises
+    }
+
+    private static func normalizeTimelineVisibilityIfNeeded(fm: FileManager, notesRoot: URL) {
+        guard let en = fm.enumerator(at: notesRoot, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
+            return
+        }
+        for case let url as URL in en {
+            if url.pathExtension.lowercased() != "json" { continue }
+            guard let data = try? Data(contentsOf: url),
+                  var note = try? JSONDecoder().decode(SessionNote.self, from: data)
+            else { continue }
+            guard var kinds = note.timelineVisibleKinds else { continue }
+            let before = kinds
+            kinds = Array(Set(kinds))
+            kinds.removeAll {
+                $0 == "environmentContext"
+                || $0 == "turnContext"
+                || $0 == "ghostSnapshot"
+                || $0 == "compaction"
+                || $0 == "turnAborted"
+                || $0 == "sessionMeta"
+                || $0 == "taskInstructions"
+            }
+            if kinds.contains("tool"), !kinds.contains("codeEdit") {
+                kinds.append("codeEdit")
+            }
+            if kinds != before {
+                note.timelineVisibleKinds = kinds
+                note.updatedAt = Date()
+                if let updated = try? JSONEncoder().encode(note) {
+                    try? updated.write(to: url, options: .atomic)
+                }
+            }
+        }
     }
 
     /// Migrate notes directory from old `~/.codex/notes` to new `~/.codmate/notes`.

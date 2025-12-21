@@ -232,18 +232,34 @@ final class SessionPreferencesStore: ObservableObject {
       defaults.object(forKey: Keys.autoAssignNewToSameProject) as? Bool ?? true
 
     // Message visibility defaults
+    var resolvedTimelineKinds: Set<MessageVisibilityKind>
     if let storedTimeline = defaults.array(forKey: Keys.timelineVisibleKinds) as? [String] {
-      self.timelineVisibleKinds = Set(
-        storedTimeline.compactMap { MessageVisibilityKind(rawValue: $0) })
+      resolvedTimelineKinds = Set(
+        storedTimeline.compactMap { MessageVisibilityKind.coerced(from: $0) })
     } else {
-      self.timelineVisibleKinds = MessageVisibilityKind.timelineDefault
+      resolvedTimelineKinds = MessageVisibilityKind.timelineDefault
     }
+    resolvedTimelineKinds.remove(.turnContext)
+    resolvedTimelineKinds.remove(.environmentContext)
+    if resolvedTimelineKinds.contains(.tool) {
+      resolvedTimelineKinds.insert(.codeEdit)
+    }
+    
+    var resolvedMarkdownKinds: Set<MessageVisibilityKind>
     if let storedMarkdown = defaults.array(forKey: Keys.markdownVisibleKinds) as? [String] {
-      self.markdownVisibleKinds = Set(
-        storedMarkdown.compactMap { MessageVisibilityKind(rawValue: $0) })
+      resolvedMarkdownKinds = Set(
+        storedMarkdown.compactMap { MessageVisibilityKind.coerced(from: $0) })
     } else {
-      self.markdownVisibleKinds = MessageVisibilityKind.markdownDefault
+      resolvedMarkdownKinds = MessageVisibilityKind.markdownDefault
     }
+    resolvedMarkdownKinds.remove(.turnContext)
+    resolvedMarkdownKinds.remove(.environmentContext)
+    if resolvedMarkdownKinds.contains(.tool) {
+      resolvedMarkdownKinds.insert(.codeEdit)
+    }
+    
+    self.timelineVisibleKinds = resolvedTimelineKinds
+    self.markdownVisibleKinds = resolvedMarkdownKinds
     // Global search panel style: load stored preference when available, default to floating.
     if let rawStyle = defaults.string(forKey: Keys.searchPanelStyle),
        let style = GlobalSearchPanelStyle(rawValue: rawStyle) {

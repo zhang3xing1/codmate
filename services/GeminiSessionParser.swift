@@ -244,6 +244,7 @@ struct GeminiSessionParser {
                 message: text,
                 kind: nil,
                 text: text,
+                reason: nil,
                 info: nil,
                 rateLimits: nil
               )))
@@ -260,6 +261,7 @@ struct GeminiSessionParser {
                 message: text,
                 kind: nil,
                 text: text,
+                reason: nil,
                 info: nil,
                 rateLimits: nil
               )))
@@ -295,6 +297,7 @@ struct GeminiSessionParser {
                 message: text,
                 kind: nil,
                 text: text,
+                reason: nil,
                 info: nil,
                 rateLimits: nil
               )))
@@ -311,6 +314,7 @@ struct GeminiSessionParser {
                 message: text,
                 kind: nil,
                 text: text,
+                reason: nil,
                 info: nil,
                 rateLimits: nil
               )))
@@ -327,6 +331,7 @@ struct GeminiSessionParser {
                 message: text,
                 kind: nil,
                 text: text,
+                reason: nil,
                 info: nil,
                 rateLimits: nil
               )))
@@ -353,6 +358,7 @@ struct GeminiSessionParser {
       message: message.id,
       kind: message.type.lowercased(),
       text: nil,
+      reason: nil,
       info: nil,
       rateLimits: nil
     )
@@ -364,22 +370,25 @@ struct GeminiSessionParser {
     timestamp: Date
   ) -> SessionRow? {
     guard let name = call.name ?? call.displayName else { return nil }
-    var blocks: [ResponseContentBlock] = []
-    if let rendered = renderText(from: call.args), !rendered.isEmpty {
-      blocks.append(ResponseContentBlock(type: "text", text: rendered))
-    }
-    if let rendered = renderText(from: call.result), !rendered.isEmpty {
-      blocks.append(ResponseContentBlock(type: "text", text: rendered))
-    }
+    let outputValue: JSONValue? = {
+      if let display = call.resultDisplay, !display.isEmpty {
+        return .string(display)
+      }
+      return call.result
+    }()
     let payload = ResponseItemPayload(
       type: "tool_call",
       status: call.status,
       callID: call.id,
       name: name,
-      content: blocks.isEmpty ? nil : blocks,
+      content: nil,
       summary: nil,
       encryptedContent: nil,
-      role: "assistant"
+      role: "assistant",
+      arguments: call.args,
+      input: nil,
+      output: outputValue,
+      ghostCommit: nil
     )
     return SessionRow(timestamp: timestamp, kind: .responseItem(payload))
   }
@@ -400,6 +409,7 @@ struct GeminiSessionParser {
       message: body,
       kind: nil,
       text: body,
+      reason: nil,
       info: nil,
       rateLimits: nil
     )
@@ -410,23 +420,30 @@ struct GeminiSessionParser {
     _ tokens: ConversationRecord.Message.Tokens,
     timestamp: Date
   ) -> SessionRow? {
-    let details: [String] = [
-      tokens.input.flatMap { "input: \($0)" },
-      tokens.output.flatMap { "output: \($0)" },
-      tokens.cached.flatMap { "cached: \($0)" },
-      tokens.thoughts.flatMap { "thoughts: \($0)" },
-      tokens.tool.flatMap { "tool: \($0)" },
-      tokens.total.flatMap { "total: \($0)" },
-    ].compactMap { $0 }
+    var info: [String: JSONValue] = [:]
+    var hasNonZero = false
 
-    guard !details.isEmpty else { return nil }
-    let text = details.joined(separator: ", ")
+    func addNumber(_ key: String, _ value: Int?) {
+      guard let value else { return }
+      info[key] = .number(Double(value))
+      if value > 0 { hasNonZero = true }
+    }
+
+    addNumber("input", tokens.input)
+    addNumber("output", tokens.output)
+    addNumber("cached", tokens.cached)
+    addNumber("thoughts", tokens.thoughts)
+    addNumber("tool", tokens.tool)
+    addNumber("total", tokens.total)
+
+    guard !info.isEmpty, hasNonZero else { return nil }
     let payload = EventMessagePayload(
       type: "token_count",
-      message: text,
+      message: nil,
       kind: nil,
-      text: text,
-      info: nil,
+      text: nil,
+      reason: nil,
+      info: .object(info),
       rateLimits: nil
     )
     return SessionRow(timestamp: timestamp, kind: .eventMessage(payload))

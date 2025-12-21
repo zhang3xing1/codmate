@@ -284,6 +284,7 @@ struct ClaudeSessionParser {
                 message: summary,
                 kind: nil,
                 text: summary,
+                reason: nil,
                 info: nil,
                 rateLimits: nil)
             return [SessionRow(timestamp: timestamp, kind: .eventMessage(payload))]
@@ -297,30 +298,39 @@ struct ClaudeSessionParser {
         let blocks = Self.blocks(from: message)
         var rows: [SessionRow] = []
 
+        // Collect all text blocks and images into a single user message
+        var textParts: [String] = []
+        var hasImage = false
+
         for block in blocks {
             switch block.type {
             case "text", nil:
                 if let text = Self.renderText(from: block), !text.isEmpty {
-                    let payload = EventMessagePayload(
-                        type: "user_message",
-                        message: text,
-                        kind: nil,
-                        text: text,
-                        info: nil,
-                        rateLimits: nil)
-                    rows.append(SessionRow(timestamp: timestamp, kind: .eventMessage(payload)))
+                    textParts.append(text)
                 }
+            case "image":
+                hasImage = true
             case "tool_result":
-                if let text = Self.renderText(from: block), !text.isEmpty {
+                let outputValue: JSONValue? = {
+                    if let content = block.content { return content }
+                    if let text = block.text, !text.isEmpty { return .string(text) }
+                    if let rendered = Self.renderText(from: block), !rendered.isEmpty { return .string(rendered) }
+                    return nil
+                }()
+                if let outputValue {
                     let item = ResponseItemPayload(
                         type: "tool_output",
                         status: nil,
                         callID: block.toolUseId,
                         name: block.name,
-                        content: [ResponseContentBlock(type: "text", text: text)],
+                        content: nil,
                         summary: nil,
                         encryptedContent: nil,
-                        role: "system")
+                        role: "system",
+                        arguments: nil,
+                        input: nil,
+                        output: outputValue,
+                        ghostCommit: nil)
                     rows.append(SessionRow(timestamp: timestamp, kind: .responseItem(item)))
                 }
             default:
@@ -328,17 +338,53 @@ struct ClaudeSessionParser {
             }
         }
 
-        if let toolResult = line.toolUseResult,
-           let rendered = Self.stringify(toolResult),
-           !rendered.isEmpty {
+        // Create a single user message combining all text blocks
+        if !textParts.isEmpty || hasImage {
+            let combinedText = textParts.joined(separator: "\n\n")
+
+            // Check if this is a system-generated message that should be classified as "other"
+            let isSystemGenerated = combinedText.contains("<command-name>") ||
+                                  combinedText.contains("<command-message>") ||
+                                  combinedText.contains("<command-args>") ||
+                                  combinedText.contains("<local-command-stdout>") ||
+                                  combinedText.contains("<local-command-stderr>") ||
+                                  combinedText.hasPrefix("Caveat: ")
+
+            let messageType = isSystemGenerated ? "info_other" : "user_message"
+            let displayText = hasImage && combinedText.isEmpty ? "[Image]" : combinedText
+
             let payload = EventMessagePayload(
-                type: "tool_output",
-                message: rendered,
+                type: messageType,
+                message: displayText,
                 kind: nil,
-                text: rendered,
+                text: displayText,
+                reason: nil,
                 info: nil,
                 rateLimits: nil)
-            rows.append(SessionRow(timestamp: timestamp, kind: .eventMessage(payload)))
+            rows.insert(SessionRow(timestamp: timestamp, kind: .eventMessage(payload)), at: 0)
+        }
+
+        if let toolResult = line.toolUseResult {
+            let outputValue: JSONValue = toolResult
+            let payload = ResponseItemPayload(
+                type: "tool_output",
+                status: nil,
+                callID: nil,
+                name: nil,
+                content: nil,
+                summary: nil,
+                encryptedContent: nil,
+                role: "system",
+                arguments: nil,
+                input: nil,
+                output: outputValue,
+                ghostCommit: nil
+            )
+            rows.append(SessionRow(timestamp: timestamp, kind: .responseItem(payload)))
+        }
+
+        if let usage = message.usage, let row = tokenUsageRow(usage, timestamp: timestamp) {
+            rows.append(row)
         }
 
         return rows
@@ -358,6 +404,7 @@ struct ClaudeSessionParser {
                         message: text,
                         kind: nil,
                         text: text,
+                        reason: nil,
                         info: nil,
                         rateLimits: nil)
                     rows.append(SessionRow(timestamp: timestamp, kind: .eventMessage(payload)))
@@ -373,30 +420,91 @@ struct ClaudeSessionParser {
                         content: [ResponseContentBlock(type: "text", text: text)],
                         summary: nil,
                         encryptedContent: nil,
-                        role: "assistant")
+                        role: "assistant",
+                        arguments: nil,
+                        input: nil,
+                        output: nil,
+                        ghostCommit: nil)
                     rows.append(SessionRow(timestamp: timestamp, kind: .responseItem(item)))
                 }
             case "tool_use":
-                let rendered = block.input.flatMap { Self.stringify($0) } ?? ""
-                let contentBlocks = rendered.isEmpty
-                    ? []
-                    : [ResponseContentBlock(type: "text", text: rendered)]
+                let inputValue = block.input
                 let item = ResponseItemPayload(
                     type: "tool_call",
                     status: nil,
                     callID: block.id,
                     name: block.name,
-                    content: contentBlocks,
+                    content: nil,
                     summary: nil,
                     encryptedContent: nil,
-                    role: "assistant")
+                    role: "assistant",
+                    arguments: nil,
+                    input: inputValue,
+                    output: nil,
+                    ghostCommit: nil)
                 rows.append(SessionRow(timestamp: timestamp, kind: .responseItem(item)))
             default:
                 break
             }
         }
 
+        if let usage = message.usage, let row = tokenUsageRow(usage, timestamp: timestamp) {
+            rows.append(row)
+        }
+
         return rows
+    }
+
+    private func tokenUsageRow(_ usage: ClaudeUsage, timestamp: Date) -> SessionRow? {
+        var info: [String: JSONValue] = [:]
+        var hasNonZero = false
+
+        func addNumber(_ key: String, _ value: Int?) {
+            guard let value else { return }
+            info[key] = .number(Double(value))
+            if value > 0 { hasNonZero = true }
+        }
+
+        addNumber("input", usage.inputTokens)
+        addNumber("output", usage.outputTokens)
+        addNumber("cacheRead", usage.cacheReadInputTokens)
+        addNumber("cacheCreation", usage.cacheCreationInputTokens)
+        addNumber("total", usage.totalTokens)
+
+        if let cache = usage.cacheCreation {
+            var cacheInfo: [String: JSONValue] = [:]
+            if let value = cache.ephemeral5m {
+                cacheInfo["ephemeral5m"] = .number(Double(value))
+                if value > 0 { hasNonZero = true }
+            }
+            if let value = cache.ephemeral1h {
+                cacheInfo["ephemeral1h"] = .number(Double(value))
+                if value > 0 { hasNonZero = true }
+            }
+            if !cacheInfo.isEmpty {
+                info["cacheCreationDetail"] = .object(cacheInfo)
+            }
+        }
+
+        if let serverToolUse = usage.serverToolUse {
+            info["serverToolUse"] = serverToolUse
+        }
+
+        if let tier = usage.serviceTier, !tier.isEmpty {
+            info["serviceTier"] = .string(tier)
+        }
+
+        guard !info.isEmpty, hasNonZero else { return nil }
+        let payload = EventMessagePayload(
+            type: "token_count",
+            message: nil,
+            kind: nil,
+            text: nil,
+            reason: nil,
+            info: .object(info),
+            rateLimits: nil
+        )
+        return SessionRow(timestamp: timestamp, kind: .eventMessage(payload))
     }
 
     private func convertSystem(_ line: ClaudeLogLine, timestamp: Date) -> [SessionRow] {
@@ -408,6 +516,7 @@ struct ClaudeSessionParser {
             message: text,
             kind: line.subtype,
             text: text,
+            reason: nil,
             info: nil,
             rateLimits: nil)
         return [SessionRow(timestamp: timestamp, kind: .eventMessage(payload))]
@@ -480,7 +589,7 @@ struct ClaudeSessionParser {
     private static func blocks(from message: ClaudeMessage) -> [ClaudeContentBlock] {
         switch message.content {
         case .string(let text):
-            return [ClaudeContentBlock(type: "text", text: text, id: nil, name: nil, input: nil, toolUseId: nil, content: nil)]
+            return [ClaudeContentBlock(type: "text", text: text, thinking: nil, id: nil, name: nil, input: nil, toolUseId: nil, content: nil, signature: nil)]
         case .blocks(let blocks):
             return blocks
         case .none:
@@ -503,6 +612,7 @@ struct ClaudeSessionParser {
     private static func renderText(from block: ClaudeContentBlock?) -> String? {
         guard let block else { return nil }
         if let text = block.text, !text.isEmpty { return text }
+        if let thinking = block.thinking, !thinking.isEmpty { return thinking }
         if let rendered = block.content.flatMap({ stringify($0) }), !rendered.isEmpty {
             return rendered
         }
@@ -706,6 +816,8 @@ struct ClaudeSessionParser {
         let cacheReadInputTokens: Int?
         let cacheCreationInputTokens: Int?
         let cacheCreation: CacheCreation?
+        let serverToolUse: JSONValue?
+        let serviceTier: String?
 
         enum CodingKeys: String, CodingKey {
             case inputTokens = "input_tokens"
@@ -713,6 +825,8 @@ struct ClaudeSessionParser {
             case cacheReadInputTokens = "cache_read_input_tokens"
             case cacheCreationInputTokens = "cache_creation_input_tokens"
             case cacheCreation = "cache_creation"
+            case serverToolUse = "server_tool_use"
+            case serviceTier = "service_tier"
         }
 
         struct CacheCreation: Decodable {
@@ -758,11 +872,13 @@ struct ClaudeSessionParser {
     private struct ClaudeContentBlock: Decodable {
         let type: String?
         let text: String?
+        let thinking: String?
         let id: String?
         let name: String?
         let input: JSONValue?
         let toolUseId: String?
         let content: JSONValue?
+        let signature: String?
     }
 
     private static func countToolUses(in message: ClaudeMessage?, seen: inout Set<String>) -> Int {

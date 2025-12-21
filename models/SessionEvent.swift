@@ -88,6 +88,7 @@ struct EventMessagePayload: Decodable {
     let message: String?
     let kind: String?
     let text: String?
+    let reason: String?
     let info: JSONValue?
     let rateLimits: JSONValue?
 
@@ -96,6 +97,7 @@ struct EventMessagePayload: Decodable {
         case message
         case kind
         case text
+        case reason
         case info
         case rateLimits = "rate_limits"
     }
@@ -110,6 +112,10 @@ struct ResponseItemPayload: Decodable {
     let summary: [ResponseSummaryItem]?
     let encryptedContent: String?
     let role: String?
+    let arguments: JSONValue?
+    let input: JSONValue?
+    let output: JSONValue?
+    let ghostCommit: JSONValue?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -120,6 +126,10 @@ struct ResponseItemPayload: Decodable {
         case summary
         case encryptedContent = "encrypted_content"
         case role
+        case arguments
+        case input
+        case output
+        case ghostCommit = "ghost_commit"
     }
 }
 

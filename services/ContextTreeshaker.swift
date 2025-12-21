@@ -230,15 +230,15 @@ actor ContextTreeshaker {
 
 // MARK: - Helpers
 private func isReasoning(_ e: TimelineEvent) -> Bool {
-    (e.title?.localizedCaseInsensitiveContains("agent reasoning") ?? false)
+    e.visibilityKind == .reasoning
 }
 
 private func isInfoSummary(_ e: TimelineEvent) -> Bool {
     guard e.actor == .info else { return false }
-    if e.title == TimelineEvent.environmentContextTitle { return false }
-    let lower = (e.title ?? "").lowercased()
-    if lower == "context updated" { return false }
-    if lower.contains("agent reasoning") { return false }
-    if lower.contains("token usage") { return false }
-    return true
+    switch e.visibilityKind {
+    case .environmentContext, .turnContext, .reasoning, .tokenUsage:
+        return false
+    default:
+        return true
+    }
 }

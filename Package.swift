@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "CodMate",
     defaultLocalization: "en",
-    platforms: [.macOS(.v15)],
+    platforms: [.macOS(.v13)],
     products: [
         .executable(
             name: "CodMate",

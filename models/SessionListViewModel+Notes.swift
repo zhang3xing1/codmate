@@ -4,7 +4,10 @@ import Foundation
 extension SessionListViewModel {
     func timelineVisibleKindsOverride(for sessionId: String) -> Set<MessageVisibilityKind>? {
         let raw = notesSnapshot[sessionId]?.timelineVisibleKinds
-        return Set<MessageVisibilityKind>.fromRawValues(raw)
+        guard var set = Set<MessageVisibilityKind>.fromRawValues(raw) else { return nil }
+        set.remove(.environmentContext)
+        if set.contains(.tool) { set.insert(.codeEdit) }
+        return set
     }
 
     func updateTimelineVisibleKindsOverride(

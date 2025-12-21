@@ -124,7 +124,7 @@ SANDBOX=off ./scripts/macos-build-notarized-dmg.sh
 | `PROJECT` | `CodMate.xcodeproj` | Xcode project file |
 | `CONFIG` | `Release` | Build configuration |
 | `ARCH_MATRIX` | `arm64 x86_64` | Architectures to build |
-| `MIN_MACOS` | `15.0` | Minimum macOS version |
+| `MIN_MACOS` | `13.5` | Minimum macOS version |
 | `OUTPUT_DIR` | `/Volumes/External/Downloads` | Output directory |
 
 ### MAS-Specific

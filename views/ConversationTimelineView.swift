@@ -14,240 +14,112 @@ struct ConversationTimelineView: View {
   var branding: SessionSourceBranding = SessionSource.codexLocal.branding
   var allowManualToggle: Bool = true
   var autoExpandVisible: Bool = false
-  var onScrollToTurn: ((String) -> Void)? = nil
-  @StateObject private var layout = TimelineLayoutStore()
-  @State private var messageScrollView: NSScrollView?
-  @State private var markerScrollView: NSScrollView?
-  @State private var messageScrollObserver: NSObjectProtocol?
-  @State private var markerScrollObserver: NSObjectProtocol?
-  @State private var suppressMarkerSync = false
-  @State private var suppressMessageSync = false
+  var nowModeEnabled: Bool = false
+  var onNowModeChange: ((Bool) -> Void)? = nil
+  @State private var scrollView: NSScrollView?
+  @State private var scrollObserver: NSObjectProtocol?
+  @State private var suppressNowModeCallback = false
 
   var body: some View {
-    HStack(alignment: .top, spacing: 8) {
-      markerColumn
-      messageColumn
-    }
-    .onAppear {
-      layout.updateOrder(turns.map(\.id))
-    }
-    .onChange(of: turns.map(\.id)) { newValue in
-      layout.updateOrder(newValue)
-    }
-    .onDisappear {
-      if let observer = messageScrollObserver {
-        NotificationCenter.default.removeObserver(observer)
-      }
-      if let observer = markerScrollObserver {
-        NotificationCenter.default.removeObserver(observer)
-      }
-    }
-  }
+    ScrollView {
+      LazyVStack(alignment: .leading, spacing: 20) {
+        // ScrollViewAccessor to get NSScrollView reference
+        ScrollViewAccessor { sv in
+          attachScrollView(sv)
+        }
+        .frame(width: 0, height: 0)
 
-  private var markerColumn: some View {
-    ScrollView(.vertical, showsIndicators: false) {
-      LazyVStack(alignment: .center, spacing: 0) {
         ForEach(Array(turns.enumerated()), id: \.element.id) { index, turn in
           let pos = ascending ? (index + 1) : (turns.count - index)
-          let bodyHeight = layout.bodyHeights[turn.id] ?? 0
-          let isVisible = layout.visibleRange?.contains(index) ?? true
-          let height = layout.headerHeight + (isVisible ? bodyHeight : 0)
-          Button(action: { scrollMessage(to: turn.id) }) {
-            TimelineMarker(
-              position: pos,
-              timeText: timelineTimeFormatter.string(from: turn.timestamp),
-              isFirst: index == turns.startIndex,
-              isLast: index == turns.count - 1
-            )
-          }
-          .buttonStyle(.plain)
-          .frame(height: max(height, layout.headerHeight), alignment: .top)
-          .frame(maxWidth: .infinity)
-          .contentShape(Rectangle())
+          ConversationTurnRow(
+            turn: turn,
+            position: pos,
+            isFirst: index == turns.startIndex,
+            isLast: index == turns.count - 1,
+            isExpanded: expandedTurnIDs.contains(turn.id),
+            branding: branding,
+            allowToggle: allowManualToggle,
+            autoExpandVisible: autoExpandVisible,
+            toggleExpanded: { toggle(turn) }
+          )
         }
       }
-      .padding(.top, 2)
+      .padding(.horizontal, 12)
+      .padding(.vertical, 8)
     }
-    .frame(width: 72)
-    .scrollIndicators(.hidden)
-    .background(ScrollViewAccessor { scrollView in
-      attachMarkerScrollView(scrollView)
-    })
-  }
-
-  private var messageColumn: some View {
-    ScrollView {
-      LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-        ForEach(Array(turns.enumerated()), id: \.element.id) { _, turn in
-          Section {
-            ConversationTurnRow(
-              turn: turn,
-              isExpanded: expandedTurnIDs.contains(turn.id),
-              branding: branding,
-              toggleExpanded: { toggle(turn) },
-              autoExpandVisible: autoExpandVisible
-            )
-            .id(turn.id)
-            .padding(.bottom, 18)
-            .background(
-              GeometryReader { proxy in
-                Color.clear
-                  .preference(key: TurnBodyHeightKey.self, value: [turn.id: proxy.size.height])
-              }
-            )
-          } header: {
-            ConversationTurnHeaderRow(
-              turn: turn,
-              isExpanded: expandedTurnIDs.contains(turn.id),
-              branding: branding,
-              allowToggle: allowManualToggle,
-              onToggle: { toggle(turn) },
-              onJump: { scrollMessage(to: turn.id) }
-            )
-            .background(
-              GeometryReader { proxy in
-                Color.clear
-                  .preference(key: TurnHeaderHeightKey.self, value: proxy.size.height)
-              }
-            )
-          }
-        }
+    .onChange(of: turns.map(\.id)) { _, _ in
+      // Auto-scroll to bottom when Now mode is enabled and content changes
+      if nowModeEnabled {
+        scrollToBottom()
       }
-      .padding(.top, 2)
     }
-    .scrollIndicators(.automatic)
-    .background(ScrollViewAccessor { scrollView in
-      attachMessageScrollView(scrollView)
-    })
-    .onPreferenceChange(TurnBodyHeightKey.self) { values in
-      layout.updateBodyHeights(values)
+    .onChange(of: nowModeEnabled) { _, isEnabled in
+      // Scroll to bottom when user explicitly enables Now mode
+      if isEnabled {
+        scrollToBottom()
+      }
     }
-    .onPreferenceChange(TurnHeaderHeightKey.self) { height in
-      if height > 0 { layout.headerHeight = height }
+    .onDisappear {
+      if let observer = scrollObserver {
+        NotificationCenter.default.removeObserver(observer)
+      }
     }
   }
 
-  @MainActor
-  private func attachMessageScrollView(_ scrollView: NSScrollView) {
-    guard messageScrollView !== scrollView else { return }
-    if let observer = messageScrollObserver {
-      NotificationCenter.default.removeObserver(observer)
+  private func attachScrollView(_ sv: NSScrollView) {
+    guard scrollView !== sv else { return }
+    scrollView = sv
+
+    if let existing = scrollObserver {
+      NotificationCenter.default.removeObserver(existing)
     }
-    messageScrollView = scrollView
-    scrollView.contentView.postsBoundsChangedNotifications = true
-    messageScrollObserver = NotificationCenter.default.addObserver(
+
+    scrollObserver = NotificationCenter.default.addObserver(
       forName: NSView.boundsDidChangeNotification,
-      object: scrollView.contentView,
+      object: sv.contentView,
       queue: .main
-    ) { _ in
+    ) { [weak sv] _ in
+      guard sv != nil else { return }
       Task { @MainActor in
-        messageDidScroll()
+        self.didScroll()
       }
     }
-    messageDidScroll()
-  }
 
-  @MainActor
-  private func attachMarkerScrollView(_ scrollView: NSScrollView) {
-    guard markerScrollView !== scrollView else { return }
-    if let observer = markerScrollObserver {
-      NotificationCenter.default.removeObserver(observer)
-    }
-    markerScrollView = scrollView
-    scrollView.hasVerticalScroller = false
-    scrollView.autohidesScrollers = true
-    scrollView.contentView.postsBoundsChangedNotifications = true
-    markerScrollObserver = NotificationCenter.default.addObserver(
-      forName: NSView.boundsDidChangeNotification,
-      object: scrollView.contentView,
-      queue: .main
-    ) { _ in
-      Task { @MainActor in
-        markerDidScroll()
-      }
-    }
-  }
-
-  @MainActor
-  private func messageDidScroll() {
-    guard let messageScrollView else { return }
-    if suppressMessageSync { return }
-    
-    let offsetY = messageScrollView.contentView.bounds.origin.y
-    let viewportHeight = messageScrollView.contentView.bounds.height
-    layout.updateVisibleRange(for: offsetY, viewportHeight: viewportHeight)
-    syncMarkerToMessage(offsetY: offsetY)
-  }
-
-  @MainActor
-  private func markerDidScroll() {
-    guard let markerScrollView else { return }
-    if suppressMarkerSync { return }
-    
-    syncMessageToMarker(markerOffsetY: markerScrollView.contentView.bounds.origin.y)
-  }
-
-  @MainActor
-  private func syncMarkerToMessage(offsetY: CGFloat? = nil) {
-    guard let messageScrollView, let markerScrollView else { return }
-    let messageOffset = offsetY ?? messageScrollView.contentView.bounds.origin.y
-    guard let markerOffset = layout.markerOffset(forMessageOffset: messageOffset) else { return }
-    
-    // Dispatch to allow layout to update (accordion effect) before scrolling
+    // Initialize Now mode state based on initial scroll position
     DispatchQueue.main.async {
-      let markerViewport = markerScrollView.contentView.bounds.height
-      let maxOffset = max(0, layout.markerContentHeight() - markerViewport)
-      let clamped = min(max(markerOffset, 0), maxOffset)
-      
-      if abs(markerScrollView.contentView.bounds.origin.y - clamped) > 0.5 {
-        suppressMarkerSync = true
-        markerScrollView.contentView.scroll(to: NSPoint(x: 0, y: clamped))
-        markerScrollView.reflectScrolledClipView(markerScrollView.contentView)
-        // Release suppression in next cycle
-        DispatchQueue.main.async {
-          suppressMarkerSync = false
-        }
-      }
+      self.didScroll()
     }
   }
 
   @MainActor
-  private func syncMessageToMarker(markerOffsetY: CGFloat? = nil) {
-    guard let messageScrollView, let markerScrollView else { return }
-    let markerOffset = markerOffsetY ?? markerScrollView.contentView.bounds.origin.y
-    guard let targetOffset = layout.messageOffset(forMarkerOffset: markerOffset) else { return }
-    let viewport = messageScrollView.contentView.bounds.height
-    let maxOffset = max(0, layout.messageContentHeight() - viewport)
-    let clamped = min(max(targetOffset, 0), maxOffset)
-    
-    if abs(messageScrollView.contentView.bounds.origin.y - clamped) > 0.5 {
-      suppressMessageSync = true
-      messageScrollView.contentView.scroll(to: NSPoint(x: 0, y: clamped))
-      messageScrollView.reflectScrolledClipView(messageScrollView.contentView)
-      DispatchQueue.main.async {
-        self.suppressMessageSync = false
-      }
+  private func didScroll() {
+    guard let scrollView else { return }
+    if suppressNowModeCallback { return }
+
+    let offsetY = scrollView.contentView.bounds.origin.y
+    let viewportHeight = scrollView.contentView.bounds.height
+    let contentHeight = scrollView.documentView?.bounds.height ?? 0
+    let maxOffset = max(0, contentHeight - viewportHeight)
+    let isAtBottom = abs(offsetY - maxOffset) < 10  // 10pt threshold
+
+    if isAtBottom != nowModeEnabled {
+      onNowModeChange?(isAtBottom)
     }
   }
 
-  private func scrollMessage(to id: String) {
-    guard let messageScrollView else { return }
-    guard let targetOffset = layout.messageOffset(for: id) else { return }
-    let viewport = messageScrollView.contentView.bounds.height
-    let maxOffset = max(0, layout.messageContentHeight() - viewport)
-    let clamped = min(max(targetOffset, 0), maxOffset)
-    
-    suppressMessageSync = true
-    messageScrollView.contentView.scroll(to: NSPoint(x: 0, y: clamped))
-    messageScrollView.reflectScrolledClipView(messageScrollView.contentView)
-    // Manually trigger marker sync since we suppressed the message sync
-    layout.updateVisibleRange(for: clamped, viewportHeight: viewport)
-    syncMarkerToMessage(offsetY: clamped)
-    
+  private func scrollToBottom() {
+    guard let scrollView else { return }
+    let viewport = scrollView.contentView.bounds.height
+    let contentHeight = scrollView.documentView?.bounds.height ?? 0
+    let maxOffset = max(0, contentHeight - viewport)
+
+    suppressNowModeCallback = true
+    scrollView.contentView.scroll(to: NSPoint(x: 0, y: maxOffset))
+    scrollView.reflectScrolledClipView(scrollView.contentView)
+
     DispatchQueue.main.async {
-      self.suppressMessageSync = false
+      self.suppressNowModeCallback = false
     }
-    onScrollToTurn?(id)
   }
 
   private func toggle(_ turn: ConversationTurn) {
@@ -258,32 +130,70 @@ struct ConversationTimelineView: View {
       expandedTurnIDs.insert(turn.id)
     }
   }
+}
 
+// ScrollViewAccessor to get the underlying NSScrollView
+private struct ScrollViewAccessor: NSViewRepresentable {
+  let onScrollViewAvailable: (NSScrollView) -> Void
+
+  func makeNSView(context: Context) -> NSView {
+    let view = NSView()
+    DispatchQueue.main.async {
+      if let scrollView = view.enclosingScrollView {
+        onScrollViewAvailable(scrollView)
+      }
+    }
+    return view
+  }
+
+  func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 private struct ConversationTurnRow: View {
   let turn: ConversationTurn
+  let position: Int
+  let isFirst: Bool
+  let isLast: Bool
   let isExpanded: Bool
   let branding: SessionSourceBranding
-  let toggleExpanded: () -> Void
+  let allowToggle: Bool
   let autoExpandVisible: Bool
+  let toggleExpanded: () -> Void
   @State private var isVisible = false
 
   var body: some View {
     let expanded = autoExpandVisible ? isVisible : isExpanded
-    ConversationCard(
-      turn: turn,
-      isExpanded: expanded,
-      branding: branding,
-      toggle: toggleExpanded
-    )
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .padding(.top, -6)
-    .padding(.bottom, 16)
-    .onAppear { if autoExpandVisible { isVisible = true } }
-    .onDisappear { if autoExpandVisible { isVisible = false } }
-    .onChange(of: autoExpandVisible) { newValue in
-      if !newValue { isVisible = false }
+    HStack(alignment: .top, spacing: 8) {
+      TimelineMarker(
+        position: position,
+        timeText: timelineTimeFormatter.string(from: turn.timestamp),
+        isFirst: isFirst,
+        isLast: isLast
+      )
+
+      ConversationCard(
+        turn: turn,
+        isExpanded: expanded,
+        branding: branding,
+        allowToggle: allowToggle,
+        toggle: toggleExpanded
+      )
+      .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .onAppear {
+      if autoExpandVisible {
+        isVisible = true
+      }
+    }
+    .onDisappear {
+      if autoExpandVisible {
+        isVisible = false
+      }
+    }
+    .onChange(of: autoExpandVisible) { _, newValue in
+      if !newValue {
+        isVisible = false
+      }
     }
   }
 }
@@ -330,77 +240,17 @@ private struct TimelineMarker: View {
   }
 }
 
-private struct ConversationTurnHeaderRow: View {
-  let turn: ConversationTurn
-  let isExpanded: Bool
-  let branding: SessionSourceBranding
-  let allowToggle: Bool
-  let onToggle: () -> Void
-  let onJump: () -> Void
-
-  var body: some View {
-    Button(action: onJump) {
-      HStack {
-        Text(turn.actorSummary(using: branding.displayName))
-          .font(.subheadline.weight(.semibold))
-          .foregroundStyle(.primary)
-        Spacer()
-        Button(action: onToggle) {
-          Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.plain)
-        .disabled(!allowToggle)
-      }
-      .padding(12)
-      .background(
-        UnevenRoundedRectangle(
-          topLeadingRadius: 0,
-          bottomLeadingRadius: 0,
-          bottomTrailingRadius: 0,
-          topTrailingRadius: 14
-        )
-        .fill(Color(nsColor: .controlBackgroundColor))
-      )
-      .overlay(
-        UnevenRoundedRectangle(
-          topLeadingRadius: 0,
-          bottomLeadingRadius: 0,
-          bottomTrailingRadius: 0,
-          topTrailingRadius: 14
-        )
-        .stroke(Color.primary.opacity(0.07), lineWidth: 1)
-      )
-    }
-    .buttonStyle(.plain)
-    .contentShape(Rectangle())
-    .hoverHand()
-  }
-}
-
-private struct TurnBodyHeightKey: PreferenceKey {
-  static var defaultValue: [String: CGFloat] = [:]
-  static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
-    value.merge(nextValue(), uniquingKeysWith: { max($0, $1) })
-  }
-}
-
-private struct TurnHeaderHeightKey: PreferenceKey {
-  static var defaultValue: CGFloat = 0
-  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-    value = max(value, nextValue())
-  }
-}
-
 private struct ConversationCard: View {
   let turn: ConversationTurn
   let isExpanded: Bool
   let branding: SessionSourceBranding
+  let allowToggle: Bool
   let toggle: () -> Void
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
+      header
+
       if isExpanded {
         expandedBody
       } else {
@@ -413,7 +263,7 @@ private struct ConversationCard: View {
         topLeadingRadius: 0,
         bottomLeadingRadius: 14,
         bottomTrailingRadius: 14,
-        topTrailingRadius: 0
+        topTrailingRadius: 14
       )
       .fill(Color(nsColor: .controlBackgroundColor))
     )
@@ -426,6 +276,27 @@ private struct ConversationCard: View {
       )
       .stroke(Color.primary.opacity(0.07), lineWidth: 1)
     )
+  }
+
+  private var header: some View {
+    HStack {
+      Text(turn.actorSummary(using: branding.displayName))
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(.primary)
+      Spacer()
+      if allowToggle {
+        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(.secondary)
+      }
+    }
+    .contentShape(Rectangle())
+    .onTapGesture {
+      if allowToggle {
+        toggle()
+      }
+    }
+    .hoverHand()
   }
 
   @ViewBuilder
@@ -464,148 +335,90 @@ private struct EventSegmentView: View {
   @State private var isHover = false
 
   var body: some View {
-    ZStack(alignment: .topTrailing) {
-      VStack(alignment: .leading, spacing: 6) {
-        Label {
-          Text(roleTitle)
-            .font(.subheadline.weight(.semibold))
-        } icon: {
-          Image(systemName: roleIcon)
-            .foregroundStyle(roleColor)
-        }
-        .labelStyle(.titleAndIcon)
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(alignment: .firstTextBaseline, spacing: 6) {
+        roleIconView
+          .foregroundStyle(roleColor)
 
-        if let title = event.title, !title.isEmpty, event.actor != .user, title != roleTitle {
-          Text(title)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
+        Text(roleTitle)
+          .font(.caption.weight(.medium))
+          .foregroundStyle(.secondary)
 
-        if let text = event.text, !text.isEmpty {
-          if event.visibilityKind == .user {
-            CollapsibleUserText(text: text, lineLimit: 10)
-          } else {
-            Text(text)
-              .textSelection(.enabled)
-              .font(.body)
-              .frame(maxWidth: .infinity, alignment: .leading)
-          }
-        }
-
-        if !event.attachments.isEmpty {
-          HStack(spacing: 6) {
-            Image(systemName: "photo")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-            Text("\(event.attachments.count) image\(event.attachments.count == 1 ? "" : "s")")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-          }
-        }
-
-        if let metadata = event.metadata, !metadata.isEmpty {
-          VStack(alignment: .leading, spacing: 2) {
-            ForEach(metadata.keys.sorted(), id: \.self) { key in
-              if let value = metadata[key], !value.isEmpty {
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                  Text(key + ":")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                  Text(value)
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                }
-              }
-            }
-          }
-        }
-      }
-
-      HStack(spacing: 6) {
-        if isHover {
-          Button(action: copyEvent) {
-            Image(systemName: "doc.on.doc")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-              .accessibilityLabel("Copy")
-          }
-          .buttonStyle(.plain)
-          .help("Copy")
-          .transition(.opacity)
-        }
         if event.repeatCount > 1 {
           Text("×\(event.repeatCount)")
             .font(.caption2.monospacedDigit())
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
             .background(
-              Capsule().fill(Color.secondary.opacity(0.15))
+              Capsule()
+                .fill(Color.secondary.opacity(0.1))
             )
-            .foregroundStyle(.secondary)
+        }
+
+        Spacer()
+
+        Button {
+          NSPasteboard.general.clearContents()
+          NSPasteboard.general.setString(event.text ?? "", forType: .string)
+        } label: {
+          Image(systemName: "doc.on.doc")
+            .font(.caption2)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .opacity(isHover ? 1 : 0)
+        .help("Copy to clipboard")
+      }
+
+      if let text = event.text, !text.isEmpty {
+        // User messages and tool_output use collapsible text
+        if event.visibilityKind == .user {
+          CollapsibleText(text: text, lineLimit: 10)
+        } else if event.actor == .tool {
+          CollapsibleText(text: text, lineLimit: 3)
+        } else {
+          Text(text)
+            .textSelection(.enabled)
+            .font(.body)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
       }
-      .padding(.top, 6)
-      .padding(.trailing, 6)
-    }
-    .onHover { inside in withAnimation(.easeInOut(duration: 0.12)) { isHover = inside } }
-  }
 
-  private func copyEvent() {
-    var lines: [String] = []
-    // Role/title
-    lines.append("**\(roleTitle)**")
-    if let title = event.title, !title.isEmpty, event.actor != .user {
-      lines.append(title)
-    }
-    // Body
-    if let text = event.text, !text.isEmpty { lines.append(text) }
-    if !event.attachments.isEmpty {
-      lines.append("Images: \(event.attachments.count)")
-    }
-    // Metadata
-    if let metadata = event.metadata, !metadata.isEmpty {
-      for key in metadata.keys.sorted() {
-        if let value = metadata[key], !value.isEmpty { lines.append("- \(key): \(value)") }
+      if let metadata = event.metadata {
+        MetadataView(metadata: metadata)
       }
     }
-    let s = lines.joined(separator: "\n")
-    let pb = NSPasteboard.general
-    pb.clearContents()
-    pb.setString(s, forType: .string)
+    .onHover { hovering in
+      isHover = hovering
+    }
   }
 
   private var roleTitle: String {
+    event.visibilityKind.settingsLabel
+  }
+
+  @ViewBuilder
+  private var roleIconView: some View {
     switch event.visibilityKind {
-    case .user: return "User"
-    case .assistant: return branding.displayName
-    case .tool: return "Tool"
-    case .reasoning: return "Reasoning"
-    case .tokenUsage: return "Token Usage"
-    case .environmentContext: return "Environment"
-    case .turnContext: return "Turn Context"
-    case .sessionMeta: return "Session Meta"
-    case .taskInstructions: return "Task Instructions"
-    case .compaction: return "Compaction"
-    case .turnAborted: return "Turn Aborted"
-    case .ghostSnapshot: return "Ghost Snapshot"
-    case .infoOther: return "Info"
+    case .assistant:
+      ProviderIconView(provider: branding.providerKind, size: 12, cornerRadius: 2)
+    default:
+      Image(systemName: roleIconName)
+        .font(.caption2)
     }
   }
 
-  private var roleIcon: String {
+  private var roleIconName: String {
     switch event.visibilityKind {
     case .user: return "person.fill"
     case .assistant: return branding.symbolName
     case .tool: return "hammer.fill"
+    case .codeEdit: return "square.and.pencil"
     case .reasoning: return "brain"
     case .tokenUsage: return "gauge"
     case .environmentContext: return "macwindow"
     case .turnContext: return "arrow.triangle.2.circlepath"
-    case .sessionMeta: return "info.circle"
-    case .taskInstructions: return "list.bullet.rectangle"
-    case .compaction: return "arrow.down.right.and.arrow.up.left"
-    case .turnAborted: return "exclamationmark.triangle"
-    case .ghostSnapshot: return "camera"
     case .infoOther: return "info.circle"
     }
   }
@@ -615,16 +428,16 @@ private struct EventSegmentView: View {
     case .user: return .accentColor
     case .assistant: return branding.iconColor
     case .tool: return .yellow
+    case .codeEdit: return .green
     case .reasoning: return .purple
     case .tokenUsage: return .orange
-    case .environmentContext, .turnContext, .sessionMeta, .taskInstructions, .compaction, .ghostSnapshot, .infoOther:
+    case .environmentContext, .turnContext, .infoOther:
       return .gray
-    case .turnAborted: return .red
     }
   }
 }
 
-private struct CollapsibleUserText: View {
+private struct CollapsibleText: View {
   let text: String
   let lineLimit: Int
   @State private var isExpanded = false
@@ -644,15 +457,18 @@ private struct CollapsibleUserText: View {
           Image(systemName: "ellipsis")
             .font(.caption)
             .foregroundStyle(.secondary)
+            .padding(4)  // Add padding to increase tap area
         }
         .buttonStyle(.plain)
+        .contentShape(Rectangle())  // Make entire button area tappable
         .hoverHand()
       }
     }
   }
 
   private func linePreview(_ text: String, limit: Int) -> (text: String, truncated: Bool) {
-    guard limit > 0 else { return ("", !text.isEmpty) }
+    // limit = 0 means no truncation, show all
+    guard limit > 0 else { return (text, false) }
     var newlineCount = 0
     for index in text.indices {
       if text[index] == "\n" {
@@ -666,202 +482,34 @@ private struct CollapsibleUserText: View {
   }
 }
 
-@MainActor
-private final class TimelineLayoutStore: ObservableObject {
-  @Published var headerHeight: CGFloat = 44
-  @Published var bodyHeights: [String: CGFloat] = [:]
-  @Published var visibleRange: ClosedRange<Int>? = nil
+private struct MetadataView: View {
+  let metadata: [String: String]
+  private let keyColumnWidth: CGFloat = 240
 
-  private(set) var order: [String] = []
-  private var indexById: [String: Int] = [:]
-
-  func updateOrder(_ ids: [String]) {
-    guard ids != order else { return }
-    order = ids
-    indexById = Dictionary(uniqueKeysWithValues: ids.enumerated().map { ($1, $0) })
-    visibleRange = nil
-  }
-
-  func updateBodyHeights(_ values: [String: CGFloat]) {
-    var changed = false
-    for (id, height) in values {
-      guard height > 0 else { continue }
-      if bodyHeights[id] != height {
-        bodyHeights[id] = height
-        changed = true
-      }
-    }
-    if changed == false {
-      return
-    }
-  }
-
-  func messageContentHeight() -> CGFloat {
-    messageHeights().reduce(0, +)
-  }
-
-  func markerContentHeight() -> CGFloat {
-    guard !order.isEmpty else { return 0 }
-    return markerHeights().reduce(0, +)
-  }
-
-  func messageOffset(for id: String) -> CGFloat? {
-    guard let index = indexById[id] else { return nil }
-    let heights = messageHeights()
-    guard index <= heights.count else { return nil }
-    return heights.prefix(index).reduce(0, +)
-  }
-
-  func updateVisibleRange(for offset: CGFloat, viewportHeight: CGFloat) {
-    let heights = messageHeights()
-    guard !heights.isEmpty else {
-      visibleRange = nil
-      return
-    }
-    let prefix = prefixSums(heights)
-    let start = indexForOffset(offset, prefix: prefix, count: heights.count)
-    let end = indexForOffset(offset + viewportHeight, prefix: prefix, count: heights.count)
-    let range = start...min(end, heights.count - 1)
-    if range != visibleRange {
-      visibleRange = range
-    }
-  }
-
-  func markerOffset(forMessageOffset offset: CGFloat) -> CGFloat? {
-    let messageHeights = messageHeights()
-    guard !messageHeights.isEmpty else { return nil }
-    let messagePrefix = prefixSums(messageHeights)
-    let index = indexForOffset(offset, prefix: messagePrefix, count: messageHeights.count)
-    let rawHeaderY = messagePrefix[index] - offset
-    var headerY = max(rawHeaderY, 0)
-    if index + 1 < messagePrefix.count {
-      let nextHeaderY = messagePrefix[index + 1] - offset
-      let pushUpLimit = nextHeaderY - headerHeight
-      headerY = min(headerY, pushUpLimit)
-    }
-
-    let markerHeights = markerHeights()
-    let markerPrefix = prefixSums(markerHeights)
-    guard index < markerPrefix.count else { return nil }
-    return markerPrefix[index] - headerY
-  }
-
-  func messageOffset(forMarkerOffset offset: CGFloat) -> CGFloat? {
-    let messageHeights = messageHeights()
-    let markerHeights = markerHeights()
-    guard !messageHeights.isEmpty, !markerHeights.isEmpty else { return nil }
-    let markerPrefix = prefixSums(markerHeights)
-    let index = indexForOffset(offset, prefix: markerPrefix, count: markerHeights.count)
-    let messagePrefix = prefixSums(messageHeights)
-    let headerY = markerPrefix[index] - offset
-    if headerY < 0, index + 1 < messagePrefix.count {
-      return messagePrefix[index + 1] - headerHeight - headerY
-    }
-    return messagePrefix[index] - headerY
-  }
-
-  private func messageHeights() -> [CGFloat] {
-    order.map { headerHeight + (bodyHeights[$0] ?? 0) }
-  }
-
-  private func markerHeight(at index: Int) -> CGFloat {
-    guard order.indices.contains(index) else { return headerHeight }
-    let body = bodyHeights[order[index]] ?? 0
-    let visible = visibleRange?.contains(index) ?? true
-    return headerHeight + (visible ? body : 0)
-  }
-
-  private func markerHeights() -> [CGFloat] {
-    order.indices.map { markerHeight(at: $0) }
-  }
-
-  private func prefixSums(_ heights: [CGFloat]) -> [CGFloat] {
-    var prefix = Array(repeating: CGFloat(0), count: heights.count + 1)
-    for i in heights.indices {
-      prefix[i + 1] = prefix[i] + heights[i]
-    }
-    return prefix
-  }
-
-  private func indexForOffset(_ offset: CGFloat, prefix: [CGFloat], count: Int) -> Int {
-    if count <= 1 { return 0 }
-    var low = 0
-    var high = count
-    while low + 1 < high {
-      let mid = (low + high) / 2
-      if prefix[mid] <= offset {
-        low = mid
-      } else {
-        high = mid
-      }
-    }
-    return min(max(low, 0), count - 1)
-  }
-}
-
-private struct ScrollViewAccessor: NSViewRepresentable {
-  let onResolve: (NSScrollView) -> Void
-
-  func makeCoordinator() -> Coordinator {
-    Coordinator(onResolve: onResolve)
-  }
-
-  func makeNSView(context: Context) -> NSView {
-    let view = NSView()
-    context.coordinator.attach(to: view)
-    return view
-  }
-
-  func updateNSView(_ nsView: NSView, context: Context) {
-    context.coordinator.attach(to: nsView)
-  }
-
-  final class Coordinator {
-    private let onResolve: (NSScrollView) -> Void
-    private weak var lastResolved: NSScrollView?
-    private var pendingWork: DispatchWorkItem?
-
-    init(onResolve: @escaping (NSScrollView) -> Void) {
-      self.onResolve = onResolve
-    }
-
-    func attach(to view: NSView) {
-      scheduleResolve(from: view)
-    }
-
-    private func scheduleResolve(from view: NSView) {
-      pendingWork?.cancel()
-      let work = DispatchWorkItem { [weak self, weak view] in
-        guard let self, let view else { return }
-        if let scrollView = self.findScrollView(from: view) {
-          if self.lastResolved !== scrollView {
-            self.lastResolved = scrollView
-            self.onResolve(scrollView)
+  var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      ForEach(metadata.keys.sorted(), id: \.self) { key in
+        if let value = metadata[key], !value.isEmpty {
+          HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(key)
+              .font(.caption2)
+              .foregroundStyle(.tertiary)
+              .lineLimit(1)
+              .truncationMode(.tail)
+              .frame(width: keyColumnWidth, alignment: .trailing)
+            Text(value)
+              .font(.caption2.monospaced())
+              .foregroundStyle(.secondary)
+              .textSelection(.enabled)
+              .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 8)
           }
-          return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self, weak view] in
-          guard let self, let view else { return }
-          self.scheduleResolve(from: view)
         }
       }
-      pendingWork = work
-      DispatchQueue.main.async(execute: work)
     }
-
-    private func findScrollView(from view: NSView) -> NSScrollView? {
-      if let scrollView = view.enclosingScrollView { return scrollView }
-      var current = view.superview
-      while let candidate = current {
-        if let scrollView = candidate as? NSScrollView { return scrollView }
-        if let enclosing = candidate.enclosingScrollView { return enclosing }
-        current = candidate.superview
-      }
-      return nil
-    }
+    .padding(.top, 4)
   }
 }
-
 
 #Preview {
   ConversationTimelinePreview()
@@ -876,29 +524,34 @@ private struct ConversationTimelinePreview: View {
       id: UUID().uuidString,
       timestamp: now,
       actor: .user,
-      visibilityKind: .user,
       title: nil,
       text: "Please outline a multi-tenant design for the MCP Mate project.",
-      metadata: nil
+      metadata: nil,
+      repeatCount: 1,
+      attachments: [],
+      visibilityKind: .user
     )
     let infoEvent = TimelineEvent(
       id: UUID().uuidString,
       timestamp: now.addingTimeInterval(6),
       actor: .info,
-      visibilityKind: .turnContext,
       title: "Context Updated",
       text: "model: gpt-5.2-codex\npolicy: on-request",
       metadata: nil,
-      repeatCount: 3
+      repeatCount: 3,
+      attachments: [],
+      visibilityKind: .turnContext
     )
     let assistantEvent = TimelineEvent(
       id: UUID().uuidString,
       timestamp: now.addingTimeInterval(12),
       actor: .assistant,
-      visibilityKind: .assistant,
       title: nil,
       text: "Certainly. Here are the key considerations for a multi-tenant design...",
-      metadata: nil
+      metadata: nil,
+      repeatCount: 1,
+      attachments: [],
+      visibilityKind: .assistant
     )
     return ConversationTurn(
       id: UUID().uuidString,
@@ -912,7 +565,7 @@ private struct ConversationTimelinePreview: View {
     ConversationTimelineView(
       turns: [sampleTurn],
       expandedTurnIDs: $expanded,
-            branding: SessionSource.codexLocal.branding
+      branding: SessionSource.codexLocal.branding
     )
     .padding()
     .frame(width: 540)

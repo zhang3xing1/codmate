@@ -50,7 +50,7 @@ struct ConversationTurnPreview: Identifiable, Hashable, Sendable, Codable {
 
         // Check for tool calls and thinking
         self.hasToolCalls = turn.outputs.contains { $0.actor == .tool }
-        self.hasThinking = turn.outputs.contains { $0.title == "Agent Reasoning" }
+        self.hasThinking = turn.outputs.contains { $0.visibilityKind == .reasoning }
     }
 
     // Direct initializer for decoding from SQLite

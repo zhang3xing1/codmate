@@ -3,7 +3,6 @@ import Foundation
 struct SessionTimelineLoader {
     private let decoder: JSONDecoder
     private let skippedEventTypes: Set<String> = [
-        "reasoning",
         "reasoning_output"
     ]
     private let turnBoundaryMetadataKey = "turn_boundary"
@@ -54,14 +53,9 @@ struct SessionTimelineLoader {
             if let summary = payload.summary, !summary.isEmpty { parts.append(summary) }
             let text = parts.joined(separator: "\n")
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-            return TimelineEvent(
-                id: UUID().uuidString,
-                timestamp: row.timestamp,
-                actor: .info,
-                title: "Context Updated",
-                text: text,
-                metadata: nil
-            )
+            // Turn Context is already surfaced in the Environment Context section;
+            // skip adding it to the conversation timeline.
+            return nil
         case let .eventMessage(payload):
             let type = payload.type.lowercased()
             if type == "turn_boundary" {
@@ -85,6 +79,9 @@ struct SessionTimelineLoader {
             if type == "token_count" {
                 return makeTokenCountEvent(timestamp: row.timestamp, payload: payload)
             }
+            if type == "turn_aborted" || type == "turn aborted" || type == "compaction" || type == "compacted" {
+                return nil
+            }
             if type == "agent_reasoning" {
                 let reasoning = cleanedText(payload.text ?? payload.message ?? "")
                 guard !reasoning.isEmpty else { return nil }
@@ -94,8 +91,12 @@ struct SessionTimelineLoader {
                     actor: .info,
                     title: "Agent Reasoning",
                     text: reasoning,
-                    metadata: nil
+                    metadata: nil,
+                    visibilityKind: .reasoning
                 )
+            }
+            if type == "ghost_snapshot" || type == "ghost snapshot" {
+                return nil
             }
             if type == "environment_context" {
                 if let env = payload.message ?? payload.text {
@@ -104,8 +105,20 @@ struct SessionTimelineLoader {
                 return nil
             }
 
-            let message = cleanedText(payload.message ?? payload.text ?? "")
+            let message = cleanedText(payload.message ?? payload.text ?? payload.reason ?? "")
             guard !message.isEmpty else { return nil }
+            let mappedKind = MessageVisibilityKind.mappedKind(
+                rawType: payload.type,
+                title: payload.kind ?? payload.type,
+                metadata: nil
+            )
+            let effectiveKind: MessageVisibilityKind? = {
+                guard mappedKind == .tool else { return mappedKind }
+                if containsCodeEditMarkers(message) || containsStrongEditOutputMarkers(message) {
+                    return .codeEdit
+                }
+                return mappedKind
+            }()
             switch type {
             case "user_message":
                 return TimelineEvent(
@@ -115,7 +128,8 @@ struct SessionTimelineLoader {
                     title: nil,
                     text: message,
                     metadata: nil,
-                    repeatCount: repeatCountHint(from: payload.info)
+                    repeatCount: repeatCountHint(from: payload.info),
+                    visibilityKind: effectiveKind ?? .user
                 )
             case "agent_message":
                 return TimelineEvent(
@@ -125,23 +139,31 @@ struct SessionTimelineLoader {
                     title: nil,
                     text: message,
                     metadata: nil,
-                    repeatCount: repeatCountHint(from: payload.info)
+                    repeatCount: repeatCountHint(from: payload.info),
+                    visibilityKind: effectiveKind ?? .assistant
                 )
             default:
+                let actor = effectiveKind?.defaultActor ?? .info
                 return TimelineEvent(
                     id: UUID().uuidString,
                     timestamp: row.timestamp,
-                    actor: .info,
+                    actor: actor,
                     title: payload.type,
                     text: message,
-                    metadata: nil
+                    metadata: nil,
+                    visibilityKind: effectiveKind
                 )
             }
         case let .responseItem(payload):
             let type = payload.type.lowercased()
-            if skippedEventTypes.contains(type) || type.contains("function_call") || type.contains("tool_call")
-                || type.contains("tool_output")
-            {
+            if skippedEventTypes.contains(type) { return nil }
+            if type == "ghost_snapshot" || type == "ghost snapshot" { return nil }
+            if type == "reasoning",
+               let summary = payload.summary,
+               !summary.isEmpty,
+               (payload.content == nil || payload.content?.isEmpty == true) {
+                // Codex emits duplicate reasoning in response_item (summary only) + event_msg.
+                // Keep the event_msg version and skip the summary-only duplicate.
                 return nil
             }
 
@@ -161,19 +183,57 @@ struct SessionTimelineLoader {
                     actor: .assistant,
                     title: nil,
                     text: text,
-                    metadata: nil
+                    metadata: nil,
+                    visibilityKind: .assistant
                 )
             }
 
+            let contentText = cleanedText(joinedText(from: payload.content ?? []))
             let summaryText = cleanedText(joinedSummary(from: payload.summary ?? []))
-            guard !summaryText.isEmpty else { return nil }
+            let fallbackText = responseFallbackText(payload)
+            let mappedKind = MessageVisibilityKind.mappedKind(
+                rawType: payload.type,
+                title: payload.type,
+                metadata: nil
+            )
+            let detectionText: String = {
+                if !contentText.isEmpty { return contentText }
+                if !summaryText.isEmpty { return summaryText }
+                return fallbackText
+            }()
+            let resolvedKind: MessageVisibilityKind? = {
+                guard mappedKind == .tool else { return mappedKind }
+                if isCodeEdit(payload: payload, fallbackText: detectionText) { return .codeEdit }
+                return mappedKind
+            }()
+            let baseText: String
+            if resolvedKind == .tool || resolvedKind == .codeEdit {
+                if !contentText.isEmpty { baseText = contentText }
+                else if !summaryText.isEmpty { baseText = summaryText }
+                else { baseText = "" }
+            } else {
+                if !contentText.isEmpty { baseText = contentText }
+                else if !summaryText.isEmpty { baseText = summaryText }
+                else { baseText = fallbackText }
+            }
+            let bodyText: String
+            if resolvedKind == .tool || resolvedKind == .codeEdit {
+                let toolText = toolDisplayText(payload: payload, fallback: baseText)
+                bodyText = toolText
+            } else {
+                bodyText = baseText
+            }
+            guard !bodyText.isEmpty else { return nil }
+            let actor = resolvedKind?.defaultActor ?? .info
             return TimelineEvent(
                 id: UUID().uuidString,
                 timestamp: row.timestamp,
-                actor: .info,
+                actor: actor,
                 title: payload.type,
-                text: summaryText,
-                metadata: nil
+                text: bodyText,
+                metadata: nil,
+                visibilityKind: resolvedKind,
+                callID: payload.callID
             )
         case .unknown:
             return nil
@@ -213,7 +273,8 @@ struct SessionTimelineLoader {
         }
 
         let ordered = events.sorted(by: { $0.timestamp < $1.timestamp })
-        let deduped = collapseDuplicates(ordered)
+        let mergedTools = mergeToolInvocations(in: ordered)
+        let deduped = collapseDuplicates(mergedTools)
 
         for event in deduped {
             if event.title == TimelineEvent.environmentContextTitle {
@@ -236,6 +297,74 @@ struct SessionTimelineLoader {
         return turns
     }
 
+    private func mergeToolInvocations(in events: [TimelineEvent]) -> [TimelineEvent] {
+        var result: [TimelineEvent] = []
+        var pendingByCallID: [String: Int] = [:]
+
+        for event in events {
+            guard isToolLike(event.visibilityKind),
+                  let callID = event.callID,
+                  !callID.isEmpty else {
+                result.append(event)
+                continue
+            }
+
+            if isToolOutputEvent(event), let index = pendingByCallID[callID] {
+                let merged = mergeToolOutput(into: result[index], output: event)
+                result[index] = merged
+                continue
+            }
+
+            pendingByCallID[callID] = result.count
+            result.append(event)
+        }
+
+        return result
+    }
+
+    private func isToolLike(_ kind: MessageVisibilityKind) -> Bool {
+        switch kind {
+        case .tool, .codeEdit:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func isToolOutputEvent(_ event: TimelineEvent) -> Bool {
+        let type = (event.title ?? "").lowercased()
+        if type.isEmpty { return false }
+        if type.contains("output") || type.contains("result") { return true }
+        return false
+    }
+
+    private func mergeToolOutput(into callEvent: TimelineEvent, output: TimelineEvent) -> TimelineEvent {
+        let callText = callEvent.text ?? ""
+        let outputText = output.text ?? ""
+        let mergedText: String
+        if outputText.isEmpty {
+            mergedText = callText
+        } else if callText.isEmpty {
+            mergedText = outputText
+        } else if callText.contains(outputText) {
+            mergedText = callText
+        } else {
+            mergedText = [callText, outputText].joined(separator: "\n\n")
+        }
+        return TimelineEvent(
+            id: callEvent.id,
+            timestamp: callEvent.timestamp,
+            actor: callEvent.actor,
+            title: callEvent.title,
+            text: mergedText,
+            metadata: callEvent.metadata,
+            repeatCount: callEvent.repeatCount,
+            attachments: callEvent.attachments,
+            visibilityKind: callEvent.visibilityKind,
+            callID: callEvent.callID
+        )
+    }
+
     private func cleanedText(_ text: String) -> String {
         guard !text.isEmpty else { return text }
         return text
@@ -250,6 +379,201 @@ struct SessionTimelineLoader {
 
     private func joinedSummary(from items: [ResponseSummaryItem]) -> String {
         items.compactMap { $0.text }.joined(separator: "\n\n")
+    }
+
+    private func responseFallbackText(_ payload: ResponseItemPayload) -> String {
+        var lines: [String] = []
+
+        if let name = payload.name, !name.isEmpty {
+            lines.append("name: \(name)")
+        }
+        if let args = renderValue(payload.arguments), !args.isEmpty {
+            lines.append(formatLabel("arguments", value: args))
+        }
+        if let input = renderValue(payload.input), !input.isEmpty {
+            lines.append(formatLabel("input", value: input))
+        }
+        if let output = renderValue(payload.output), !output.isEmpty {
+            lines.append(formatLabel("output", value: output))
+        }
+        if let ghost = renderValue(payload.ghostCommit), !ghost.isEmpty {
+            lines.append(formatLabel("ghost_commit", value: ghost))
+        }
+
+        if lines.isEmpty, let callID = payload.callID, !callID.isEmpty {
+            lines.append("call_id: \(callID)")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func toolDisplayText(payload: ResponseItemPayload, fallback: String) -> String {
+        var lines: [String] = []
+
+        if let name = payload.name, !name.isEmpty {
+            lines.append("name: \(name)")
+        }
+
+        let argumentValue = payload.arguments ?? payload.input
+        if let args = renderValue(argumentValue), !args.isEmpty {
+            lines.append(formatLabel("arguments", value: args))
+        }
+
+        if let output = renderValue(payload.output), !output.isEmpty {
+            lines.append(formatLabel("output", value: output))
+        }
+
+        if lines.isEmpty { return fallback }
+
+        let composed = lines.joined(separator: "\n")
+        guard !fallback.isEmpty else { return composed }
+        if fallback == composed { return composed }
+        if composed.contains(fallback) { return composed }
+        return [composed, fallback].joined(separator: "\n")
+    }
+
+    private func isCodeEdit(payload: ResponseItemPayload, fallbackText: String) -> Bool {
+        let name = normalizeToolName(payload.name)
+        if codeEditToolNames.contains(name) { return true }
+
+        if containsEditKeys(payload.arguments) || containsEditKeys(payload.input) {
+            return true
+        }
+
+        if name == "execcommand" || name == "bash" || name == "runshellcommand" {
+            let argsText = stringValue(payload.arguments) ?? ""
+            if containsCodeEditMarkers(argsText) { return true }
+        }
+
+        if let outputText = stringValue(payload.output),
+           containsStrongEditOutputMarkers(outputText) { return true }
+
+        if containsCodeEditMarkers(fallbackText) { return true }
+
+        return false
+    }
+
+    private var codeEditToolNames: Set<String> {
+        [
+            "edit",
+            "write",
+            "replace",
+            "applypatch",
+            "patch",
+            "createfile",
+            "writefile",
+            "deletefile",
+            "fileedit",
+            "filewrite",
+            "updatefile",
+            "insert",
+            "append",
+            "move",
+            "rename",
+            "remove",
+            "multiedit"
+        ]
+    }
+
+    private func normalizeToolName(_ name: String?) -> String {
+        let raw = name?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if raw.isEmpty { return "" }
+        return raw
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: " ", with: "")
+    }
+
+    private func containsEditKeys(_ value: JSONValue?) -> Bool {
+        guard let value else { return false }
+        switch value {
+        case .object(let dict):
+            let keys = Set(dict.keys.map { $0.lowercased() })
+            let hasPath = keys.contains("file_path") || keys.contains("filepath") || keys.contains("path")
+            let hasOldNew = keys.contains("old_string") || keys.contains("new_string")
+            let hasPatch = keys.contains("patch") || keys.contains("diff")
+            let hasContent = keys.contains("content") || keys.contains("new_content") || keys.contains("text")
+            if hasOldNew || hasPatch { return true }
+            if hasPath && hasContent { return true }
+            return dict.values.contains { containsEditKeys($0) }
+        case .array(let array):
+            return array.contains { containsEditKeys($0) }
+        default:
+            return false
+        }
+    }
+
+    private func containsCodeEditMarkers(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        if lowered.contains("*** begin patch") { return true }
+        if lowered.contains("*** update file") { return true }
+        if lowered.contains("*** add file") { return true }
+        if lowered.contains("*** delete file") { return true }
+        if lowered.contains("update file:") { return true }
+        return false
+    }
+
+    private func containsStrongEditOutputMarkers(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        if lowered.contains("updated the following files") { return true }
+        if lowered.contains("success. updated the following files") { return true }
+        return false
+    }
+
+    private func stringValue(_ value: JSONValue?) -> String? {
+        guard let value else { return nil }
+        switch value {
+        case .string(let string):
+            return string
+        case .number(let number):
+            return String(number)
+        case .bool(let flag):
+            return flag ? "true" : "false"
+        case .array, .object, .null:
+            return nil
+        }
+    }
+
+    private func formatLabel(_ label: String, value: String) -> String {
+        value.contains("\n") ? "\(label):\n\(value)" : "\(label): \(value)"
+    }
+
+    private func renderValue(_ value: JSONValue?) -> String? {
+        guard let value else { return nil }
+        switch value {
+        case .string(let string):
+            return string
+        case .number(let number):
+            return String(number)
+        case .bool(let flag):
+            return flag ? "true" : "false"
+        case .null:
+            return nil
+        case .array, .object:
+            let raw = toAny(value)
+            guard JSONSerialization.isValidJSONObject(raw),
+                  let data = try? JSONSerialization.data(withJSONObject: raw, options: [.prettyPrinted, .sortedKeys]),
+                  let text = String(data: data, encoding: .utf8)
+            else { return nil }
+            return text
+        }
+    }
+
+    private func toAny(_ value: JSONValue) -> Any {
+        switch value {
+        case .string(let string):
+            return string
+        case .number(let number):
+            return number
+        case .bool(let flag):
+            return flag
+        case .array(let array):
+            return array.map(toAny)
+        case .object(let dict):
+            return dict.mapValues(toAny)
+        case .null:
+            return NSNull()
+        }
     }
 
     private func collapseDuplicates(_ events: [TimelineEvent]) -> [TimelineEvent] {
@@ -321,7 +645,8 @@ struct SessionTimelineLoader {
             actor: .info,
             title: TimelineEvent.environmentContextTitle,
             text: displayText.isEmpty ? nil : displayText,
-            metadata: metadata.isEmpty ? nil : metadata
+            metadata: metadata.isEmpty ? nil : metadata,
+            visibilityKind: .environmentContext
         )
     }
 
@@ -336,7 +661,8 @@ struct SessionTimelineLoader {
             actor: .info,
             title: "Token Usage",
             text: nil,
-            metadata: combined
+            metadata: combined,
+            visibilityKind: .tokenUsage
         )
     }
 

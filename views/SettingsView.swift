@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
   @ObservedObject var preferences: SessionPreferencesStore
   @Binding private var selectedCategory: SettingCategory
+  @Binding private var selectedExtensionsTab: ExtensionsSettingsTab
   @StateObject private var codexVM = CodexVM()
   @StateObject private var geminiVM = GeminiVM()
   @StateObject private var claudeVM = ClaudeCodeVM()
@@ -14,9 +15,10 @@ struct SettingsView: View {
   @State private var availableRemoteHosts: [SSHHost] = []
   @State private var isRequestingSSHAccess = false
 
-  init(preferences: SessionPreferencesStore, selection: Binding<SettingCategory>) {
+  init(preferences: SessionPreferencesStore, selection: Binding<SettingCategory>, extensionsTab: Binding<ExtensionsSettingsTab>) {
     self._preferences = ObservedObject(wrappedValue: preferences)
     self._selectedCategory = selection
+    self._selectedExtensionsTab = extensionsTab
   }
 
   var body: some View {
@@ -141,7 +143,7 @@ struct SettingsView: View {
     case .advanced:
       advancedSettings
     case .mcpServer:
-      mcpServerSettings
+      extensionsSettings
     case .about:
       aboutSettings
     }
@@ -894,9 +896,8 @@ struct SettingsView: View {
     return df
   }()
 
-  private var mcpServerSettings: some View {
-    // Avoid wrapping in ScrollView so the inner List controls scrolling
-    MCPServersSettingsPane(openMCPMateDownload: openMCPMateDownload)
+  private var extensionsSettings: some View {
+    ExtensionsSettingsView(selectedTab: $selectedExtensionsTab, openMCPMateDownload: openMCPMateDownload)
       .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
       .padding(.top, 24)
       .padding(.horizontal, 24)
@@ -1208,7 +1209,7 @@ struct SettingsView_Previews: PreviewProvider {
   static var previews: some View {
     let prefs = SessionPreferencesStore()
     let vm = SessionListViewModel(preferences: prefs)
-    return SettingsView(preferences: prefs, selection: .constant(.general))
+    return SettingsView(preferences: prefs, selection: .constant(.general), extensionsTab: .constant(.mcp))
       .environmentObject(vm)
   }
 }

@@ -23,7 +23,7 @@ public enum MCPServerTarget: String, Codable, CaseIterable, Sendable {
     case gemini
 }
 
-public struct MCPServerTargets: Codable, Equatable, Sendable {
+public struct MCPServerTargets: Codable, Equatable, Hashable, Sendable {
     public var codex: Bool
     public var claude: Bool
     public var gemini: Bool

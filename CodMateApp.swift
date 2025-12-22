@@ -12,6 +12,7 @@ struct CodMateApp: App {
   @StateObject private var listViewModel: SessionListViewModel
   @StateObject private var preferences: SessionPreferencesStore
   @State private var settingsSelection: SettingCategory = .general
+  @State private var extensionsTabSelection: ExtensionsSettingsTab = .mcp
   @Environment(\.openWindow) private var openWindow
 
   init() {
@@ -69,6 +70,20 @@ struct CodMateApp: App {
     WindowGroup {
       ContentView(viewModel: listViewModel)
         .frame(minWidth: 880, minHeight: 600)
+        .onReceive(NotificationCenter.default.publisher(for: .codMateOpenSettings)) { note in
+          let raw = note.userInfo?["category"] as? String
+          if let raw, let cat = SettingCategory(rawValue: raw) {
+            settingsSelection = cat
+            if cat == .mcpServer,
+               let tab = note.userInfo?["extensionsTab"] as? String,
+               let parsed = ExtensionsSettingsTab(rawValue: tab) {
+              extensionsTabSelection = parsed
+            }
+          } else {
+            settingsSelection = .general
+          }
+          openWindow(id: "settings")
+        }
     }
     .defaultSize(width: 1200, height: 780)
     .handlesExternalEvents(matching: [])  // 防止 URL scheme 触发新窗口创建
@@ -77,7 +92,8 @@ struct CodMateApp: App {
       SettingsWindowContainer(
         preferences: preferences,
         listViewModel: listViewModel,
-        selection: $settingsSelection
+        selection: $settingsSelection,
+        extensionsTab: $extensionsTabSelection
       )
     }
     .defaultSize(width: 800, height: 640)
@@ -89,6 +105,9 @@ struct CodMateApp: App {
 
   private func presentSettings(for category: SettingCategory) {
     settingsSelection = category
+    if category == .mcpServer {
+      extensionsTabSelection = .mcp
+    }
     #if os(macOS)
       NSApplication.shared.activate(ignoringOtherApps: true)
     #endif
@@ -100,9 +119,10 @@ private struct SettingsWindowContainer: View {
   let preferences: SessionPreferencesStore
   let listViewModel: SessionListViewModel
   @Binding var selection: SettingCategory
+  @Binding var extensionsTab: ExtensionsSettingsTab
 
   var body: some View {
-    SettingsView(preferences: preferences, selection: $selection)
+    SettingsView(preferences: preferences, selection: $selection, extensionsTab: $extensionsTab)
       .environmentObject(listViewModel)
   }
 }

@@ -104,4 +104,5 @@ extension Notification.Name {
   static let codMateGlobalRefresh = Notification.Name("CodMate.GlobalRefresh")
   static let codMateCollapseAllTasks = Notification.Name("CodMate.CollapseAllTasks")
   static let codMateExpandAllTasks = Notification.Name("CodMate.ExpandAllTasks")
+  static let codMateOpenSettings = Notification.Name("CodMate.OpenSettings")
 }

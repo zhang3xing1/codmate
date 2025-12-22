@@ -34,7 +34,7 @@ enum SettingCategory: String, CaseIterable, Identifiable {
     case .gitReview: return "Git Review"
     case .claudeCode: return "Claude Code"
     case .advanced: return "Advanced"
-    case .mcpServer: return "MCP Server"
+    case .mcpServer: return "Extensions"
     case .about: return "About"
     }
   }
@@ -51,7 +51,7 @@ enum SettingCategory: String, CaseIterable, Identifiable {
     case .advanced: return "gearshape.2"
     case .gitReview: return "square.and.pencil"
     case .claudeCode: return "chevron.left.slash.chevron.right"
-    case .mcpServer: return "server.rack"
+    case .mcpServer: return "puzzlepiece.extension"
     case .about: return "info.circle"
     }
   }
@@ -68,7 +68,7 @@ enum SettingCategory: String, CaseIterable, Identifiable {
     case .gitReview: return "Git changes viewer and commit generation"
     case .claudeCode: return "Claude Code configuration"
     case .advanced: return "Paths and deep diagnostics"
-    case .mcpServer: return "Manage Codex MCP integrations"
+    case .mcpServer: return "Manage MCP servers and Skills"
     case .about: return "App info and project links"
   }
 }

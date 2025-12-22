@@ -156,6 +156,7 @@ extension ContentView {
     }
   }
 
+
   @ViewBuilder
   func placeholderSurface(title: String, systemImage: String) -> some View {
     VStack(alignment: .center, spacing: 8) {

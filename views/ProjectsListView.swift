@@ -801,6 +801,9 @@ struct ProjectEditorSheet: View {
   @State private var profileEnvText: String = ""
   @State private var parentProjectId: String? = nil
   @State private var sources: Set<ProjectSessionSource> = ProjectSessionSource.allSet
+  @State private var mcpSearchText: String = ""
+  @State private var skillsSearchText: String = ""
+  @StateObject private var extensionsVM = ProjectExtensionsViewModel()
 
   private struct Snapshot: Equatable {
     var name: String
@@ -819,7 +822,7 @@ struct ProjectEditorSheet: View {
 
   // Unified layout constants for aligned labels/fields across tabs
   private let labelColWidth: CGFloat = 120
-  private let fieldColWidth: CGFloat = 360
+  private let fieldColWidth: CGFloat = 460
 
   private var generalTabView: some View {
     VStack(alignment: .leading, spacing: 12) {
@@ -872,7 +875,7 @@ struct ProjectEditorSheet: View {
           }
           .labelsHidden()
           .pickerStyle(.segmented)
-          .frame(maxWidth: .infinity, alignment: .leading)
+          .frame(width: fieldColWidth, alignment: .leading)
         }
         GridRow {
           Text("Sources")
@@ -893,7 +896,7 @@ struct ProjectEditorSheet: View {
           VStack(alignment: .leading, spacing: 6) {
             TextEditor(text: $overview)
               .font(.body)
-              .frame(minHeight: 88, maxHeight: 120)
+              .frame(minHeight: 88, maxHeight: .infinity)
               .overlay(
                 RoundedRectangle(cornerRadius: 6)
                   .stroke(Color.secondary.opacity(0.2))
@@ -902,18 +905,15 @@ struct ProjectEditorSheet: View {
           .frame(width: fieldColWidth, alignment: .leading)
         }
       }
+      Spacer(minLength: 0)
     }
     .padding(16)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
   }
 
   private var profileTabView: some View {
     VStack(alignment: .leading, spacing: 12) {
-      Text("Project Profile (applies to new sessions)")
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
-
-      // Sandbox + Approval (left-aligned)
-      Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+      Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
         GridRow {
           Text("Sandbox")
             .font(.subheadline)
@@ -927,7 +927,7 @@ struct ProjectEditorSheet: View {
           }
           .labelsHidden()
           .pickerStyle(.segmented)
-          .frame(maxWidth: .infinity, alignment: .leading)
+          .frame(width: fieldColWidth, alignment: .leading)
         }
         GridRow {
           Text("Approval")
@@ -961,7 +961,7 @@ struct ProjectEditorSheet: View {
         }
       }
 
-      Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+      Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
         GridRow {
           Text("PATH Prepend")
             .font(.subheadline)
@@ -992,6 +992,265 @@ struct ProjectEditorSheet: View {
     .padding(16)
   }
 
+  private var mcpTabView: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      ZStack {
+        HStack {
+          Spacer(minLength: 0)
+          ToolbarSearchField(
+            placeholder: "Search MCP servers",
+            text: $mcpSearchText,
+            onFocusChange: { _ in },
+            onSubmit: {}
+          )
+          .frame(maxWidth: .infinity)
+          Spacer(minLength: 8)
+          Button {
+            openExtensionsSettings(tab: .mcp)
+          } label: {
+            Image(systemName: "gearshape")
+              .font(.body)
+          }
+          .buttonStyle(.borderless)
+          .help("Open Extensions settings")
+        }
+        .frame(maxWidth: .infinity)
+      }
+
+      if filteredMCPSelections.isEmpty {
+        emptyState(
+          icon: "server.rack",
+          title: extensionsVM.mcpSelections.isEmpty ? "No MCP Servers" : "No Results",
+          message: extensionsVM.mcpSelections.isEmpty
+            ? "Add servers in Settings › Extensions to enable project selection."
+            : "Try a different search."
+        )
+      } else {
+        ScrollView {
+          LazyVStack(spacing: 8) {
+            ForEach(filteredMCPSelections) { entry in
+              HStack(alignment: .center, spacing: 8) {
+                Toggle(
+                  "",
+                  isOn: Binding(
+                    get: { entry.isSelected },
+                    set: { value in
+                      extensionsVM.updateMCPSelection(id: entry.id, isSelected: value)
+                    }
+                  )
+                )
+                .labelsHidden()
+                .controlSize(.small)
+
+                VStack(alignment: .leading, spacing: 4) {
+                  Text(entry.server.name)
+                    .font(.subheadline.weight(.medium))
+                  if let desc = entry.server.meta?.description, !desc.isEmpty {
+                    Text(desc)
+                      .font(.caption)
+                      .foregroundStyle(.secondary)
+                  }
+                }
+                Spacer(minLength: 8)
+                HStack(spacing: 6) {
+                  MCPServerTargetToggle(
+                    provider: .codex,
+                    isOn: Binding(
+                      get: { entry.targets.codex },
+                      set: { value in
+                        extensionsVM.updateMCPTarget(id: entry.id, target: .codex, value: value)
+                      }
+                    ),
+                    disabled: !entry.isSelected
+                  )
+                  MCPServerTargetToggle(
+                    provider: .claude,
+                    isOn: Binding(
+                      get: { entry.targets.claude },
+                      set: { value in
+                        extensionsVM.updateMCPTarget(id: entry.id, target: .claude, value: value)
+                      }
+                    ),
+                    disabled: !entry.isSelected
+                  )
+                  MCPServerTargetToggle(
+                    provider: .gemini,
+                    isOn: Binding(
+                      get: { entry.targets.gemini },
+                      set: { _ in }
+                    ),
+                    disabled: true
+                  )
+                }
+              }
+              .padding(.vertical, 6)
+            }
+          }
+          .padding(.leading, 4)
+        }
+      }
+
+      Text("Gemini project-level MCP is not supported yet.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+    .padding(16)
+  }
+
+  private var skillsTabView: some View {
+    VStack(alignment: .leading, spacing: 12) {
+
+      ZStack {
+        HStack {
+          Spacer(minLength: 0)
+          ToolbarSearchField(
+            placeholder: "Search skills",
+            text: $skillsSearchText,
+            onFocusChange: { _ in },
+            onSubmit: {}
+          )
+          .frame(maxWidth: .infinity)
+          Spacer(minLength: 8)
+          Button {
+            openExtensionsSettings(tab: .skills)
+          } label: {
+            Image(systemName: "gearshape")
+              .font(.body)
+          }
+          .buttonStyle(.borderless)
+          .help("Open Extensions settings")
+        }
+        .frame(maxWidth: .infinity)
+      }
+
+      if filteredSkills.isEmpty {
+        emptyState(
+          icon: "sparkles",
+          title: extensionsVM.skills.isEmpty ? "No Skills Installed" : "No Results",
+          message: extensionsVM.skills.isEmpty
+            ? "Install skills in Settings › Extensions to enable project selection."
+            : "Try a different search."
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else {
+        ScrollView {
+          LazyVStack(spacing: 8) {
+            ForEach(filteredSkills) { skill in
+              HStack(alignment: .center, spacing: 8) {
+                Toggle(
+                  "",
+                  isOn: Binding(
+                    get: { skill.isSelected },
+                    set: { value in extensionsVM.updateSkillSelection(id: skill.id, value: value) }
+                  )
+                )
+                .labelsHidden()
+                .controlSize(.small)
+
+                VStack(alignment: .leading, spacing: 4) {
+                  Text(skill.displayName)
+                    .font(.subheadline.weight(.medium))
+                  if !skill.summary.isEmpty {
+                    Text(skill.summary)
+                      .font(.caption)
+                      .foregroundStyle(.secondary)
+                      .lineLimit(2)
+                  }
+                }
+                Spacer(minLength: 8)
+                HStack(spacing: 6) {
+                  MCPServerTargetToggle(
+                    provider: .codex,
+                    isOn: Binding(
+                      get: { skill.targets.codex },
+                      set: { value in
+                        extensionsVM.updateSkillTarget(id: skill.id, target: .codex, value: value)
+                      }
+                    ),
+                    disabled: !skill.isSelected
+                  )
+                  MCPServerTargetToggle(
+                    provider: .claude,
+                    isOn: Binding(
+                      get: { skill.targets.claude },
+                      set: { value in
+                        extensionsVM.updateSkillTarget(id: skill.id, target: .claude, value: value)
+                      }
+                    ),
+                    disabled: !skill.isSelected
+                  )
+                }
+              }
+              .padding(.vertical, 6)
+            }
+          }
+        }
+      }
+
+      Text("Changes apply automatically.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+    .padding(16)
+  }
+
+  private func emptyState(icon: String, title: String, message: String) -> some View {
+    VStack(spacing: 8) {
+      Image(systemName: icon)
+        .font(.system(size: 28))
+        .foregroundStyle(.secondary)
+      Text(title)
+        .font(.subheadline.weight(.semibold))
+      Text(message)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
+    }
+    .frame(maxWidth: .infinity)
+    .padding(.vertical, 16)
+  }
+
+  private var filteredSkills: [SkillSummary] {
+    let trimmed = skillsSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return extensionsVM.skills }
+    return extensionsVM.skills.filter { skill in
+      let hay = [
+        skill.displayName,
+        skill.summary,
+        skill.tags.joined(separator: " "),
+        skill.source,
+      ]
+      .joined(separator: " ")
+      .lowercased()
+      return hay.contains(trimmed.lowercased())
+    }
+  }
+
+  private var filteredMCPSelections: [ProjectMCPSelection] {
+    let trimmed = mcpSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return extensionsVM.mcpSelections }
+    return extensionsVM.mcpSelections.filter { entry in
+      let hay = [
+        entry.server.name,
+        entry.server.meta?.description ?? "",
+      ]
+      .joined(separator: " ")
+      .lowercased()
+      return hay.contains(trimmed.lowercased())
+    }
+  }
+
+  private func openExtensionsSettings(tab: ExtensionsSettingsTab) {
+    NotificationCenter.default.post(
+      name: .codMateOpenSettings,
+      object: nil,
+      userInfo: [
+        "category": SettingCategory.mcpServer.rawValue,
+        "extensionsTab": tab.rawValue
+      ]
+    )
+  }
+
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
       Text(modeTitle).font(.title3).fontWeight(.semibold)
@@ -1001,6 +1260,8 @@ struct ProjectEditorSheet: View {
           TabView {
             Tab("General", systemImage: "gearshape") { generalTabView }
             Tab("Profile", systemImage: "person.crop.square") { profileTabView }
+            Tab("MCP Servers", systemImage: "server.rack") { mcpTabView }
+            Tab("Skills", systemImage: "sparkles") { skillsTabView }
           }
         } else {
           TabView {
@@ -1008,6 +1269,10 @@ struct ProjectEditorSheet: View {
               .tabItem { Label("General", systemImage: "gearshape") }
             profileTabView
               .tabItem { Label("Profile", systemImage: "person.crop.square") }
+            mcpTabView
+              .tabItem { Label("MCP Servers", systemImage: "server.rack") }
+            skillsTabView
+              .tabItem { Label("Skills", systemImage: "sparkles") }
           }
         }
       }
@@ -1025,8 +1290,12 @@ struct ProjectEditorSheet: View {
       }
     }
     .padding(16)
-    .frame(minWidth: 640, minHeight: 420)
+    .frame(minWidth: 720, minHeight: 520)
+    .codmatePresentationSizingIfAvailable()
     .onAppear(perform: load)
+    .onChange(of: directory) { newDir in
+      Task { await extensionsVM.load(projectDirectory: newDir) }
+    }
     .alert("Discard changes?", isPresented: $showCloseConfirm) {
       Button("Keep Editing", role: .cancel) {}
       Button("Discard", role: .destructive) { isPresented = false }
@@ -1087,6 +1356,7 @@ struct ProjectEditorSheet: View {
       }
     }
     original = currentSnapshot()
+    Task { await extensionsVM.load(projectDirectory: directory) }
   }
 
   private func slugify(_ s: String) -> String {

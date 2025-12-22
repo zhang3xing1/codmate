@@ -10,14 +10,17 @@ struct MCPServersSettingsPane: View {
     @State private var showEditorSheet = false
     @State private var editorIsEditingExisting = false
     var openMCPMateDownload: () -> Void
+    var showHeader: Bool = true
     @State private var pendingDeleteName: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("MCP Servers").font(.title2).fontWeight(.bold)
-            Text("Manage MCP servers. Add via Uni‑Import or configure capabilities.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+            if showHeader {
+                Text("MCP Servers").font(.title2).fontWeight(.bold)
+                Text("Manage MCP servers. Add via Uni‑Import or configure capabilities.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
 
             // List header with Add button (match Providers style)
             HStack { Spacer(); Button { editorIsEditingExisting = false; vm.startNewForm(); showEditorSheet = true } label: { Label("Add", systemImage: "plus") } }
@@ -233,6 +236,7 @@ struct MCPServersSettingsPane: View {
                         }
                     }
                 }
+                .scrollContentBackground(.hidden)
                 .frame(minHeight: 200, maxHeight: .infinity, alignment: .top)
             }
         }
@@ -714,20 +718,22 @@ private struct MCPServerEditorSheet: View {
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
-            GridRow {
-                Text("Targets").font(.subheadline).fontWeight(.medium)
-                HStack(spacing: 12) {
-                    Toggle("Codex", isOn: $vm.formTargetsCodex)
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                    Toggle("Claude Code", isOn: $vm.formTargetsClaude)
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                    Toggle("Gemini", isOn: $vm.formTargetsGemini)
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
+            if isEditing {
+                GridRow {
+                    Text("Targets").font(.subheadline).fontWeight(.medium)
+                    HStack(spacing: 12) {
+                        Toggle("Codex", isOn: $vm.formTargetsCodex)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                        Toggle("Claude Code", isOn: $vm.formTargetsClaude)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                        Toggle("Gemini", isOn: $vm.formTargetsGemini)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                 }
-                .frame(maxWidth: .infinity, alignment: .trailing)
             }
             // Enabled is controlled in list view only
         }

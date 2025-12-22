@@ -19,11 +19,12 @@ UI Rules (macOS specific)
 - Providers has been separated from the Codex tab into a top-level Settings page: Settings › Providers manages global providers and Codex/Claude bindings; Settings › Codex only retains Runtime/Notifications/Privacy/Raw Config (no longer includes Providers).
   - Built-in providers are auto-loaded from an app-bundled `payload/providers.json` (managedByCodMate=true). This avoids hardcoding and lets users simply provide API keys; base URLs/models come pre-filled. The list merges bundled entries with `~/.codmate/providers.json` (user overrides win).
   - Schema note: use a single provider-level `envKey` (preferred) for both Codex and Claude Code connectors. Connector-level `envKey` remains tolerated for backward compatibility but is considered deprecated and will be ignored at save time to avoid duplication.
-- MCP Servers page (aligned with Providers style):
-  - Main page directly displays existing server list (name, type icon, description, URL/command), with enable toggle on the left; provides pencil edit entry on the right.
-  - Fixed "Add" button in top-right corner; clicking opens independent "New MCP Server" window for Uni‑Import.
-  - New window supports paste/drag JSON text (can be extended to TOML/.mcpb later), previews parsing results and confirms import.
-  - Advanced capabilities (MCPMate download and instructions) can still provide entry at page bottom or independent instruction area, no longer as separate sub-tab.
+- Extensions page (aligned with Providers style):
+  - Settings › Extensions replaces the old MCP Server page (icon: puzzlepiece.extension).
+  - Tab 1: MCP Servers (existing list/editor/Uni‑Import UI kept as-is inside the tab).
+  - Tab 2: Skills (left list + right details split; Add menu supports folder/zip/URL; auto‑sync on changes).
+  - MCP Servers tab keeps: enable toggle on left, edit on right, fixed "Add" button, Uni‑Import preview and confirmation.
+  - Advanced capabilities (MCPMate download and instructions) remain as a footer/section in MCP Servers tab.
 - Search: prefer a toolbar `SearchField` in macOS, not `.searchable` when exact placement (far right) matters.
 - Toolbars: place refresh as the last ToolbarItem to pin it at the far right. Keep destructive actions in the detail pane, not in the main toolbar. Command+R and the refresh button also invalidate and recompute global sidebar statistics (projects/path tree and calendar day counts) to reflect new sessions immediately.
 - Sidebar (left):
@@ -41,6 +42,7 @@ UI Rules (macOS specific)
   - Sticky action bar at top: Resume, Reveal in Finder, Delete, Export Markdown.
   - Add “New” button next to Resume to start a fresh Codex session using the current session’s working directory and model.
   - When an embedded terminal is running, show a “Prompts” button beside the folder (Reveal in Finder) icon. Clicking opens a searchable popover of preset command texts; selecting one inserts it into the embedded terminal input (does not auto-execute). User presses Return to run.
+  - Project-level Extensions are configured in **Edit Project**: tabs are General, Profile, MCP Servers, Skills (auto‑sync; Gemini project-level toggles disabled). Edit Project window should be resizable.
   - Review mode: the list.bullet.rectangle button toggles a full-area Review view (third mode, alongside Conversation and Internal Terminal). In Review mode the detail area is fully occupied by a Git Changes surface. It:
     - Auto-detects the Git repo at the session’s working directory (uses `/usr/bin/env git` and a robust PATH).
     - Lists changed files with stage/unstage toggles and shows a unified diff or a raw file preview (updates on save). Preview is text-only in phase 1.

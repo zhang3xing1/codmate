@@ -17,14 +17,36 @@
             "HTTP-Referer" : "OPENROUTER_REFERRER",
             "X-Title" : "OPENROUTER_TITLE"
           }
+        },
+        "claudeCode" : {
+          "baseURL" : "https://openrouter.ai/api",
+          "modelAliases" : {
+            "default" : "anthropic/claude-4.5-sonnet",
+            "haiku" : "anthropic/claude-4.5-haiku",
+            "opus" : "anthropic/claude-4.5-opus"
+          },
+          "envHttpHeaders" : {
+            "x-api-key" : "OPENROUTER_API_KEY",
+            "HTTP-Referer" : "OPENROUTER_REFERRER",
+            "X-Title" : "OPENROUTER_TITLE"
+          }
         }
       },
       "catalog" : {
         "models" : [
-          { "vendorModelId" : "openrouter/auto", "caps" : { "reasoning": false, "tool_use": true, "long_context": true, "vision": true } }
+          { "vendorModelId" : "openrouter/auto", "caps" : { "reasoning": false, "tool_use": true, "long_context": true, "vision": true } },
+          { "vendorModelId" : "anthropic/claude-4.5-opus", "caps" : { "reasoning": true, "tool_use": true, "long_context": true, "vision": true } },
+          { "vendorModelId" : "anthropic/claude-4.5-sonnet", "caps" : { "reasoning": true, "tool_use": true, "long_context": true, "vision": true } },
+          { "vendorModelId" : "anthropic/claude-4.5-haiku", "caps" : { "reasoning": false, "tool_use": true, "long_context": true, "vision": true } },
+          { "vendorModelId" : "anthropic/claude-4.1-opus", "caps" : { "reasoning": true, "tool_use": true, "long_context": true, "vision": true } }
         ]
       },
-      "recommended" : { "defaultModelFor" : { "codex" : "openrouter/auto" } }
+      "recommended" : { 
+        "defaultModelFor" : { 
+          "codex" : "openrouter/auto",
+          "claudeCode" : "anthropic/claude-4.5-sonnet"
+        } 
+      }
     },
     {
       "id" : "openai",

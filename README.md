@@ -6,7 +6,7 @@ CodMate is a macOS SwiftUI app for **managing CLI AI sessions**: browse, search,
 
 It focuses on speed (incremental indexing + caching), a compact three-column UI, and “ship it” workflows like **Project Review (Git Changes)** and **one-click Resume/New**.
 
-Status: **macOS 13.5+**, **Swift 6**, **Xcode 16**. Universal binary (arm64 + x86_64).
+Status: **macOS 13.5+**, **Swift 6 toolchain**. Universal binary (arm64 + x86_64).
 
 ## Download
 - **Latest release (DMG)**: [GitHub Releases](https://github.com/loocor/CodMate/releases/latest)
@@ -121,7 +121,7 @@ Status: **macOS 13.5+**, **Swift 6**, **Xcode 16**. Universal binary (arm64 + x8
 - Sidebar statistics are global and decoupled from the list scope to keep navigation snappy.
 
 ## Architecture
-- App: macOS SwiftUI (min macOS 13.5). Xcode project `CodMate.xcodeproj` and SwiftPM manifest.
+- App: macOS SwiftUI (min macOS 13.5). SwiftPM-only build.
 - MVVM layering
   - Models: `SessionSummary`, `SessionEvent`, `DateDimension`, `SessionLoadScope`, …
   - Services: `SessionIndexer`, `SessionCacheStore`, `SessionActions`, `SessionTimelineLoader`, `CodexConfigService`, `SessionsDiagnosticsService`
@@ -134,69 +134,39 @@ Status: **macOS 13.5+**, **Swift 6**, **Xcode 16**. Universal binary (arm64 + x8
 
 ## Build
 Prerequisites
-- macOS 13.5+, Xcode 16 (or Swift 6 toolchain). Install the CLIs you use (Codex / Claude / Gemini) somewhere on your `PATH`.
+- macOS 13.5+, Swift 6 toolchain, Xcode Command Line Tools (for `xcrun actool`).
+- Install the CLIs you use (Codex / Claude / Gemini) somewhere on your `PATH`.
 
-Option A — Xcode
-- Open `CodMate.xcodeproj`, select the “CodMate” scheme, destination “My Mac”, then Run or Archive.
-
-Option B — CLI universal Release
+Makefile (recommended)
 ```sh
-xcodebuild \
-  -project CodMate.xcodeproj \
-  -scheme CodMate \
-  -configuration Release \
-  -destination 'generic/platform=macOS' \
-  -derivedDataPath build/DerivedData \
-  ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
-  MARKETING_VERSION=0.1.2 CURRENT_PROJECT_VERSION=1 \
-  build
-```
-The app will be at `build/DerivedData/Build/Products/Release/CodMate.app`.
-
-Option C — SwiftPM (developer run)
-```sh
-swift run CodMate
-```
-SwiftPM produces a console executable (`.build/*/CodMate`). Running it launches the SwiftUI app; no `.app` bundle is created by SwiftPM.
-
-## Package DMG
-Create a DMG with an Applications link:
-```sh
-APP=build/DerivedData/Build/Products/Release/CodMate.app
-STAGE=artifacts/.stage-dmg
-OUT=artifacts/release/CodMate-0.1.2-universal.dmg
-rm -rf "$STAGE" && mkdir -p "$STAGE" "$(dirname "$OUT")"
-cp -R "$APP" "$STAGE/" && ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname CodMate -srcfolder "$STAGE" -ov -format UDZO -imagekey zlib-level=9 "$OUT"
-rm -rf "$STAGE"
+make build   # SwiftPM debug build
+make test    # SwiftPM tests (if any)
+make app VER=1.2.3     # Create CodMate.app in build/ (ARCH defaults to host)
+make app VER=1.2.3 ARCH=arm64
+make app VER=1.2.3 ARCH=x86_64
+make app VER=1.2.3 ARCH="arm64 x86_64"
+make dmg VER=1.2.3     # Create Developer ID DMG (ARCH defaults to host)
+make dmg VER=1.2.3 ARCH=arm64
+make dmg VER=1.2.3 ARCH=x86_64
+make dmg VER=1.2.3 ARCH="arm64 x86_64"  # produces codmate-arm64.dmg + codmate-x86_64.dmg
 ```
 
-Sign (optional, for distribution):
+Direct scripts
 ```sh
-IDENTITY='Developer ID Application: Chengdu Wake.Link Technology Co., Ltd. (AN5X2K46ER)'
-codesign --force --options runtime --timestamp -s "$IDENTITY" build/DerivedData/Build/Products/Release/CodMate.app
-codesign -dv --verbose=2 build/DerivedData/Build/Products/Release/CodMate.app
-codesign -f -s "$IDENTITY" --timestamp "$OUT"
-```
-
-Notarize (optional):
-```sh
-# Assuming you have stored a notarytool profile already
-xcrun notarytool submit "$OUT" --keychain-profile <your-profile-name> --wait
-xcrun stapler staple "$OUT"
-xcrun stapler staple build/DerivedData/Build/Products/Release/CodMate.app
+VER=1.2.3 ./scripts/create-app-bundle.sh
+VER=1.2.3 ./scripts/macos-build-notarized-dmg.sh
 ```
 
 ### Versioning strategy (build script)
-- Marketing version (CFBundleShortVersionString): set with `BASE_VERSION` (e.g., `1.4.0`).
+- Marketing version (CFBundleShortVersionString): set with `VER` (e.g., `1.4.0`).
 - Build number (CFBundleVersion): controlled by `BUILD_NUMBER_STRATEGY`:
   - `date` (default): `yyyymmddHHMM` (e.g., `202510291430`).
   - `git`: `git rev-list --count HEAD`.
   - `counter`: monotonically increments a file counter at `$BUILD_DIR/build-number` (override path via `BUILD_COUNTER_FILE`).
-- DMG name: `CodMate-<BASE_VERSION>+<BUILD_NUMBER>-<ARCH>.dmg`.
+- DMG name: `codmate-<ARCH>.dmg`.
 - Override via environment variables when running the build script:
 ```sh
-BASE_VERSION=1.4.0 BUILD_NUMBER_STRATEGY=date \
+VER=1.4.0 BUILD_NUMBER_STRATEGY=date \
   ./scripts/macos-build-notarized-dmg.sh
 ```
 This sets CFBundleShortVersionString to `1.4.0`, CFBundleVersion to the computed build number, and names the DMG accordingly.
@@ -219,24 +189,21 @@ This sets CFBundleShortVersionString to `1.4.0`, CFBundleVersion to the computed
 
 ## Project Layout
 ```
-CodMate.xcodeproj/          # Xcode project (single app target “CodMate”)
-CodMate/                    # Assets and Info.plist (not in Copy Bundle Resources)
+assets/                     # Assets and Info.plist (not in Copy Bundle Resources)
 CodMateApp.swift            # App entry point
 models/                     # Data models (pure types)
 services/                   # IO + indexing + integrations
 utils/                      # Helpers (shell, sandbox, formatting, etc.)
 views/                      # SwiftUI views
 payload/                    # Bundled presets (e.g. providers.json templates)
-CodMateNotify/             # Swift command-line helper installed as `codmate-notify`
+notify/                     # Swift command-line helper installed as `codmate-notify`
 SwiftTerm/                  # Embedded terminal dependency (local package)
 scripts/                    # Helper scripts (icons, build flows)
 docs/                       # Design notes and investigation docs
-Tests/                      # XCTest (light coverage)
 ```
 
 ## Known Pitfalls
 - Prefer a toolbar search field (far‑right aligned) over `.searchable` to avoid hijacking toolbar slots on macOS.
-- Keep `Info.plist` out of Copy Bundle Resources (Xcode otherwise warns and build fails).
 - Outline row height needs explicit tightening (see `defaultMinListRowHeight` and insets in the row views).
 
 ## Development Tips

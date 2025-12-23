@@ -850,15 +850,6 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
           LabeledContent("Version") { Text(versionString) }
           LabeledContent("Build Timestamp") { Text(buildTimestampString) }
-          if let tag = gitTagString {
-            LabeledContent("Git Tag") { Text(tag) }
-          }
-          if let commit = gitCommitString {
-            LabeledContent("Git Commit") { Text(commit) }
-          }
-          if let state = gitStateString {
-            LabeledContent("Working Tree") { Text(state) }
-          }
           LabeledContent("Latest Release") {
             Link(releasesURL.absoluteString, destination: releasesURL)
           }
@@ -891,27 +882,6 @@ struct SettingsView: View {
     let version = info?["CFBundleShortVersionString"] as? String ?? "—"
     let build = info?["CFBundleVersion"] as? String ?? "—"
     return "\(version) (\(build))"
-  }
-
-  private var gitTagString: String? {
-    guard let raw = Bundle.main.infoDictionary?["CodMateGitTag"] as? String,
-      !raw.isEmpty
-    else { return nil }
-    return raw
-  }
-
-  private var gitCommitString: String? {
-    guard let raw = Bundle.main.infoDictionary?["CodMateGitCommit"] as? String,
-      !raw.isEmpty
-    else { return nil }
-    return raw
-  }
-
-  private var gitStateString: String? {
-    guard let raw = Bundle.main.infoDictionary?["CodMateGitDirty"] as? String else { return nil }
-    if raw == "1" { return "Dirty" }
-    if raw == "0" { return "Clean" }
-    return nil
   }
 
   private var buildTimestampString: String {

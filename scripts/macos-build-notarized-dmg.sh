@@ -2,48 +2,32 @@
 
 set -euo pipefail
 
-# CodMate macOS notarized DMG builder
-# - Archives via xcodebuild
-# - Exports signed Developer ID app
-# - Builds DMG (create-dmg if available, otherwise hdiutil)
-# - Notarizes with notarytool and staples
+# CodMate macOS notarized DMG builder (SwiftPM)
+# - Builds app bundle via scripts/create-app-bundle.sh
+# - Signs app (Developer ID)
+# - Creates DMG
+# - Notarizes + staples (optional)
 #
-# Loads .env from repo root if present (APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID)
-# Usage (with Keychain profile):
-#   APPLE_NOTARY_PROFILE="AC_PROFILE_NAME" \
-#   ./scripts/macos-build-notarized-dmg.sh
+# Usage:
+#   VER=1.2.3 ./scripts/macos-build-notarized-dmg.sh
 #
-# Usage (with Apple ID + app-specific password):
-#   APPLE_ID="appleid@example.com" \
-#   APPLE_PASSWORD="abcd-efgh-ijkl-mnop" \
-#   TEAM_ID="YOURTEAMID" \
-#   ./scripts/macos-build-notarized-dmg.sh
-#
-# Default behavior: builds two notarized DMGs, one for arm64 and one for x86_64.
 # Optional overrides:
-#   SCHEME (default: CodMate (Direct) when SANDBOX=off, CodMate (MAS) when SANDBOX=on)
-#   PROJECT (default: CodMate.xcodeproj)
-#   CONFIG (default: Release-Direct when SANDBOX=off, Release-MAS when SANDBOX=on)
-#   ARCH_MATRIX (default: "arm64 x86_64"), e.g. set to "arm64" to build only arm64
-#   SIGNING_CERT (default: Developer ID Application; maps from APPLE_SIGNING_IDENTITY if present)
-#   VERSION (if set, will override Marketing Version at export time when possible)
-#   SANDBOX=on|off (default: off). When on, force App Sandbox entitlements (Mac App Store-style)
-#   APPSTORE_SIM=1 to compile with APPSTORE condition (mimic Mac App Store build-time gating)
-#   MIN_MACOS (default: derived from Xcode build settings) sets MACOSX_DEPLOYMENT_TARGET for all targets including packages
-#
-
-SCHEME="${SCHEME:-}"
-PROJECT="${PROJECT:-CodMate.xcodeproj}"
-CONFIG="${CONFIG:-}"
-# Default: build two independent DMGs, one for each arch
-ARCH_MATRIX=( ${ARCH_MATRIX:-arm64 x86_64} )
-SIGNING_CERT="${SIGNING_CERT:-}"
+#   ARCH_MATRIX="arm64 x86_64"
+#   OUTPUT_DIR=artifacts
+#   SIGNING_CERT="Developer ID Application"
+#   SANDBOX=on|off (default: off)
+#   APPLE_NOTARY_PROFILE="AC_PROFILE"
+#   APPLE_ID / APPLE_PASSWORD / TEAM_ID
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="$ROOT_DIR/build"
-OUTPUT_DIR="${OUTPUT_DIR:-/Volumes/External/Downloads}"
-DERIVED_DATA="$BUILD_DIR/DerivedData"
-EXPORT_OPTIONS_PLIST="$BUILD_DIR/ExportOptions.plist"
+BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build}"
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/artifacts}"
+APP_NAME="CodMate"
+APP_DIR="${APP_DIR:-$BUILD_DIR/CodMate.app}"
+ENTITLEMENTS_PATH="${ENTITLEMENTS_PATH:-$ROOT_DIR/assets/CodMate.entitlements}"
+ARCH_MATRIX=( ${ARCH_MATRIX:-arm64 x86_64} )
+MIN_MACOS="${MIN_MACOS:-13.5}"
+BUNDLE_ID="${BUNDLE_ID:-ai.umate.codmate}"
 
 mkdir -p "$BUILD_DIR" "$OUTPUT_DIR"
 
@@ -56,8 +40,7 @@ if [[ -f "$ENV_FILE" ]]; then
     case "$k" in
       APPLE_SIGNING_IDENTITY|APPLE_ID|APPLE_PASSWORD|APPLE_TEAM_ID)
         if [[ -z "${!k:-}" ]]; then
-          # Trim possible quotes
-          v="${v%\r}"; v="${v%\n}"; v="${v%"\""}"; v="${v#"\""}"
+          v="${v%\r}"; v="${v%\n}"; v="${v%\"}"; v="${v#\"}"
           export "$k=$v"
         fi
         ;;
@@ -66,40 +49,17 @@ if [[ -f "$ENV_FILE" ]]; then
   done < "$ENV_FILE"
 fi
 
-# Map env into script variables
-TEAM_ID="${TEAM_ID:-${APPLE_TEAM_ID:-}}"
-if [[ -z "$SIGNING_CERT" ]]; then
-  if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
-    SIGNING_CERT="$APPLE_SIGNING_IDENTITY"
-  else
-    SIGNING_CERT="Developer ID Application"
-  fi
+VER="${VER:-}"
+if [[ -z "$VER" ]]; then
+  echo "[error] VER is required. Example: VER=1.2.3 ./scripts/macos-build-notarized-dmg.sh" >&2
+  exit 1
 fi
 
-# ------------------------------
-# Versioning strategy
-# - BASE_VERSION: required semantic version (e.g., 1.4.0). You can also set VERSION as an alias.
-# - BUILD_NUMBER_STRATEGY: date | git | counter (default: date)
-# - BUILD_COUNTER_FILE: when strategy=counter, stores/increments the counter (default: $BUILD_DIR/build-number)
-# These values are applied to Xcode as MARKETING_VERSION (CFBundleShortVersionString)
-# and CURRENT_PROJECT_VERSION (CFBundleVersion). The DMG name uses "BASE_VERSION+BUILD_NUMBER".
-if [[ -z "${BASE_VERSION:-}" ]]; then
-  if [[ -n "${VERSION:-}" ]]; then
-    BASE_VERSION="$VERSION"
-  else
-    echo "[error] BASE_VERSION (or VERSION) is required. Example: BASE_VERSION=0.4.4 ./scripts/macos-build-notarized-dmg.sh" >&2
-    exit 1
-  fi
-fi
 BUILD_NUMBER_STRATEGY="${BUILD_NUMBER_STRATEGY:-date}"
-
 compute_build_number() {
   case "$BUILD_NUMBER_STRATEGY" in
-    date)
-      # yyyymmddHHMM as a single numeric component satisfies CFBundleVersion format
-      date +%Y%m%d%H%M ;;
-    git)
-      (cd "$ROOT_DIR" && git rev-list --count HEAD 2>/dev/null) || echo 1 ;;
+    date) date +%Y%m%d%H%M ;;
+    git) (cd "$ROOT_DIR" && git rev-list --count HEAD 2>/dev/null) || echo 1 ;;
     counter)
       local f="${BUILD_COUNTER_FILE:-$BUILD_DIR/build-number}"
       mkdir -p "$(dirname "$f")"
@@ -108,317 +68,171 @@ compute_build_number() {
       n=$((n+1))
       echo "$n" > "$f"
       echo "$n" ;;
-    *)
-      date +%Y%m%d%H%M ;;
+    *) date +%Y%m%d%H%M ;;
   esac
 }
 
-BUILD_NUMBER="$(compute_build_number)"
-DISPLAY_VERSION="${BASE_VERSION}+${BUILD_NUMBER}"
+BUILD_NUMBER="${BUILD_NUMBER:-$(compute_build_number)}"
+DISPLAY_VERSION="${VER}+${BUILD_NUMBER}"
 
-# Compose extra xcodebuild args BEFORE starting the archive loop
-EXTRA_XC_ARGS=()
-if [[ "${APPSTORE_SIM:-0}" == "1" ]]; then
-  # Prefer Swift 5+ macro; still pass OTHER_SWIFT_FLAGS for older setups
-  # Also define SYSTEM_PACKAGE_DARWIN to satisfy swift-system 1.6+ platform gating
-  EXTRA_XC_ARGS+=("SWIFT_ACTIVE_COMPILATION_CONDITIONS=APPSTORE")
-  # Also define SUBPROCESS_ASYNCIO_DISPATCH so Subprocess picks the DispatchIO AsyncIO on macOS
-  # Enable experimental features required by swift-subprocess main branch
-  EXTRA_XC_ARGS+=("OTHER_SWIFT_FLAGS=-DAPPSTORE -DSYSTEM_PACKAGE_DARWIN -DSUBPROCESS_ASYNCIO_DISPATCH -enable-experimental-feature LifetimeDependence -enable-experimental-feature NonescapableTypes")
-  echo "[info] APPSTORE_SIM=1 → compiling with -DAPPSTORE, -DSYSTEM_PACKAGE_DARWIN, -DSUBPROCESS_ASYNCIO_DISPATCH, experimental features"
-fi
-
-# Entitlements: sandbox on/off
 SANDBOX="${SANDBOX:-off}"
-if [[ "$SANDBOX" == "off" ]]; then
-  EXTRA_XC_ARGS+=("CODE_SIGN_ENTITLEMENTS=")
-  echo "[info] SANDBOX=off → building without App Sandbox entitlements"
+
+TEAM_ID="${TEAM_ID:-${APPLE_TEAM_ID:-}}"
+SIGNING_CERT="${SIGNING_CERT:-${APPLE_SIGNING_IDENTITY:-}}"
+if [[ -z "$SIGNING_CERT" ]]; then
+  SIGNING_CERT="Developer ID Application"
+fi
+
+if security find-identity -v -p codesigning | grep -q "$SIGNING_CERT"; then
+  CODESIGN_IDENTITY="$(security find-identity -v -p codesigning | grep "$SIGNING_CERT" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 else
-  EXTRA_XC_ARGS+=("CODE_SIGN_ENTITLEMENTS=CodMate/CodMate.entitlements")
-  echo "[info] SANDBOX=on  → App Sandbox entitlements enabled"
+  CODESIGN_IDENTITY="$SIGNING_CERT"
 fi
 
-if [[ -z "$SCHEME" ]]; then
-  if [[ "$SANDBOX" == "off" ]]; then
-    SCHEME="CodMate (Direct)"
-  else
-    SCHEME="CodMate (MAS)"
-  fi
+unset ENTITLEMENTS_ARG
+if [[ "$SANDBOX" == "on" ]]; then
+  ENTITLEMENTS_ARG=(--entitlements "$ENTITLEMENTS_PATH")
 fi
 
-if [[ -z "$CONFIG" ]]; then
-  if [[ "$SANDBOX" == "off" ]]; then
-    CONFIG="Release-Direct"
-  else
-    CONFIG="Release-MAS"
-  fi
+NOTARY_MODE="none"
+if [[ -n "${APPLE_NOTARY_PROFILE:-}" ]]; then
+  NOTARY_MODE="profile"
+elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "$TEAM_ID" ]]; then
+  NOTARY_MODE="apple"
 fi
 
-echo "[info] Using scheme '$SCHEME' with configuration '$CONFIG'"
+echo "=========================================="
+echo "  CodMate - Developer ID DMG (SwiftPM)"
+echo "=========================================="
+echo "Version: $DISPLAY_VERSION"
+echo "Architectures: ${ARCH_MATRIX[*]}"
+echo "Output: $OUTPUT_DIR"
+echo "SANDBOX: $SANDBOX"
+echo "=========================================="
 
-# Force a modern macOS deployment target to avoid arm64 + 10.13 mismatches in Swift packages
-resolve_min_macos() {
-  local target_name="CodMate"
-  local resolved=""
-  local settings=""
+build_dmg_for_arch() {
+  local arch="$1"
+  local arch_app_dir="$APP_DIR"
+  local arch_suffix="$arch"
+  local dmg_name="codmate-${arch_suffix}.dmg"
+  local dmg_path="$OUTPUT_DIR/$dmg_name"
+  local stage_dir="$BUILD_DIR/.stage-dmg-${arch_suffix}"
 
-  settings="$(xcodebuild -project "$PROJECT" -target "$target_name" -configuration "$CONFIG" -showBuildSettings 2>/dev/null || true)"
-  if [[ -z "$settings" ]]; then
-    settings="$(xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration "$CONFIG" -showBuildSettings 2>/dev/null || true)"
-  fi
-
-  resolved="$(
-    printf "%s\n" "$settings" \
-      | sed -n 's/.*MACOSX_DEPLOYMENT_TARGET = \([0-9][0-9.]*\).*/\1/p' \
-      | head -n 1
-  )"
-  echo "$resolved"
-}
-
-MIN_MACOS="${MIN_MACOS:-}"
-if [[ -z "$MIN_MACOS" ]]; then
-  MIN_MACOS="$(resolve_min_macos)"
-fi
-if [[ -z "$MIN_MACOS" ]]; then
-  echo "[error] Failed to resolve MACOSX_DEPLOYMENT_TARGET from Xcode settings. Set MIN_MACOS explicitly."
-  exit 1
-fi
-EXTRA_XC_ARGS+=("MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS}")
-echo "[info] MIN_MACOS=${MIN_MACOS} → MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS}"
-
-# Ensure Swift flags needed by some packages are always present for macOS builds
-if [[ "${APPSTORE_SIM:-0}" != "1" ]]; then
-  # Pass macOS-friendly defines so swift-system and swift-subprocess select the right code paths
-  # Also enable experimental features required by swift-subprocess main branch
-  EXTRA_XC_ARGS+=("OTHER_SWIFT_FLAGS=-DSYSTEM_PACKAGE_DARWIN -DSUBPROCESS_ASYNCIO_DISPATCH -enable-experimental-feature LifetimeDependence -enable-experimental-feature NonescapableTypes")
-  echo "[info] Adding default Swift flags: -DSYSTEM_PACKAGE_DARWIN -DSUBPROCESS_ASYNCIO_DISPATCH -enable-experimental-feature LifetimeDependence"
-fi
-
-# Pre-resolve packages so we can apply any necessary build-time patches
-echo "[prep] Resolving Swift packages (to enable pre-build patches)"
-xcrun xcodebuild \
-  -project "$PROJECT" \
-  -scheme "$SCHEME" \
-  -derivedDataPath "$DERIVED_DATA" \
-  -resolvePackageDependencies >/dev/null || true
-
-# Workaround: some Xcode toolchains fail to propagate swift-system's
-# SYSTEM_PACKAGE_DARWIN compile definition into the build. When that happens,
-# swift-system emits "#error(\"Unsupported Platform\")" on Apple platforms.
-# Patch the local checkout to also accept canImport(Darwin) as a Darwin signal.
-SWIFT_SYSTEM_INTERNALS_DIR="$DERIVED_DATA/SourcePackages/checkouts/swift-system/Sources/System/Internals"
-if [[ -d "$SWIFT_SYSTEM_INTERNALS_DIR" ]]; then
-  for f in CInterop.swift Constants.swift Exports.swift Syscalls.swift; do
-    p="$SWIFT_SYSTEM_INTERNALS_DIR/$f"
-    if [[ -f "$p" ]] && grep -q "^#if SYSTEM_PACKAGE_DARWIN" "$p" 2>/dev/null; then
-      echo "[patch] swift-system: relaxing Darwin guard in $f"
-      # Replace the first line "#if SYSTEM_PACKAGE_DARWIN" with
-      # "#if canImport(Darwin) || SYSTEM_PACKAGE_DARWIN"
-      # Use ed-style safe, portable replacement
-      perl -0777 -pe 's/^#if SYSTEM_PACKAGE_DARWIN/#if canImport(Darwin) || SYSTEM_PACKAGE_DARWIN/m' -i "$p"
-    fi
-  done
-fi
-
-CODE_SIGN_IDENTITY_ARGS=()
-if [[ -n "$SIGNING_CERT" ]]; then
-  CODE_SIGN_IDENTITY_ARGS+=("CODE_SIGN_IDENTITY=${SIGNING_CERT}")
-fi
-
-if [[ -n "$SIGNING_CERT" ]] && [[ "$SIGNING_CERT" != "Apple Development" ]] && [[ "$SIGNING_CERT" != "Apple Distribution" ]]; then
-  CODE_SIGN_STYLE_OVERRIDE="Manual"
-else
-  CODE_SIGN_STYLE_OVERRIDE="Automatic"
-fi
-
-if [[ "$CODE_SIGN_STYLE_OVERRIDE" == "Manual" ]]; then
-  CODE_SIGN_IDENTITY_ARGS+=("PROVISIONING_PROFILE_SPECIFIER=")
-  CODE_SIGN_IDENTITY_ARGS+=("PROVISIONING_PROFILE=")
-fi
-
-for ARCH in "${ARCH_MATRIX[@]}"; do
-  ARCHIVE_PATH="$BUILD_DIR/$SCHEME-$ARCH.xcarchive"
-
-  echo "[1/7][$ARCH] Archiving $SCHEME (project: $PROJECT, config: $CONFIG)"
-  if command -v xcpretty >/dev/null 2>&1; then
-    xcrun xcodebuild \
-      -project "$PROJECT" \
-      -scheme "$SCHEME" \
-      -configuration "$CONFIG" \
-      -destination 'generic/platform=macOS' \
-      -derivedDataPath "$DERIVED_DATA" \
-      -archivePath "$ARCHIVE_PATH" \
-      MARKETING_VERSION="$BASE_VERSION" \
-      CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
-      archive \
-      CODE_SIGN_STYLE="$CODE_SIGN_STYLE_OVERRIDE" \
-      DEVELOPMENT_TEAM="${TEAM_ID:-}" \
-      ARCHS="$ARCH" ONLY_ACTIVE_ARCH=YES \
-      "${CODE_SIGN_IDENTITY_ARGS[@]}" \
-      "${EXTRA_XC_ARGS[@]}" \
-      | xcpretty
-  else
-    xcrun xcodebuild \
-      -project "$PROJECT" \
-      -scheme "$SCHEME" \
-      -configuration "$CONFIG" \
-      -destination 'generic/platform=macOS' \
-      -derivedDataPath "$DERIVED_DATA" \
-      -archivePath "$ARCHIVE_PATH" \
-      MARKETING_VERSION="$BASE_VERSION" \
-      CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
-      archive \
-      CODE_SIGN_STYLE="$CODE_SIGN_STYLE_OVERRIDE" \
-      DEVELOPMENT_TEAM="${TEAM_ID:-}" \
-      ARCHS="$ARCH" ONLY_ACTIVE_ARCH=YES \
-      "${CODE_SIGN_IDENTITY_ARGS[@]}" \
-      "${EXTRA_XC_ARGS[@]}"
+  if [[ ${#ARCH_MATRIX[@]} -gt 1 ]]; then
+    arch_app_dir="$BUILD_DIR/CodMate-${arch_suffix}.app"
   fi
 
-  echo "[2/7][$ARCH] Locating built app in archive"
-  APP_PATH=$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -name "*.app" -print -quit)
-  if [[ -z "${APP_PATH}" ]]; then
-    echo "[ERROR][$ARCH] .app not found in $ARCHIVE_PATH/Products/Applications" >&2
+  echo "[build] Building app bundle for $arch_suffix"
+  VER="$VER" \
+  BUILD_NUMBER="$BUILD_NUMBER" \
+  ARCH_MATRIX="$arch" \
+  APP_DIR="$arch_app_dir" \
+  BUILD_DIR="$BUILD_DIR" \
+  MIN_MACOS="$MIN_MACOS" \
+  BUNDLE_ID="$BUNDLE_ID" \
+  "$ROOT_DIR/scripts/create-app-bundle.sh"
+
+  if [[ ! -d "$arch_app_dir" ]]; then
+    echo "[error] App bundle not found at $arch_app_dir" >&2
     exit 1
   fi
 
-  echo "[3/7][$ARCH] Verifying and post-signing app"
-  echo "[verify][$ARCH] entitlements (pre post-sign)"
-  codesign -d --entitlements :- "$APP_PATH" 2>/dev/null || true
+  if [[ -n "$CODESIGN_IDENTITY" ]]; then
+    echo "[sign] Signing with: $CODESIGN_IDENTITY"
+    xattr -cr "$arch_app_dir"
 
-  # Ensure hardened runtime is always applied and sandbox entitlements are present when needed.
-  # Some export paths may not properly apply hardened runtime or strip entitlements.
-  if [[ "$SANDBOX" == "on" ]]; then
-    ENT_FILE="$ROOT_DIR/CodMate/CodMate.entitlements"
-    if [[ -f "$ENT_FILE" ]]; then
-      echo "[post][$ARCH] Re-signing app with entitlements and hardened runtime"
-      codesign --force --options runtime \
-        --entitlements "$ENT_FILE" \
-        --sign "${SIGNING_CERT}" \
-        "$APP_PATH"
+    if [[ -f "$arch_app_dir/Contents/Resources/bin/codmate-notify" ]]; then
+      codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
+        ${ENTITLEMENTS_ARG[@]+"${ENTITLEMENTS_ARG[@]}"} \
+        "$arch_app_dir/Contents/Resources/bin/codmate-notify"
+    fi
+
+    codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
+      ${ENTITLEMENTS_ARG[@]+"${ENTITLEMENTS_ARG[@]}"} \
+      "$arch_app_dir/Contents/MacOS/CodMate"
+
+    codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
+      ${ENTITLEMENTS_ARG[@]+"${ENTITLEMENTS_ARG[@]}"} \
+      "$arch_app_dir"
+
+    codesign --verify --deep --strict --verbose=2 "$arch_app_dir"
+  else
+    echo "[warn] No signing identity found. Using ad-hoc signature."
+    codesign --force --deep --sign - "$arch_app_dir"
+  fi
+
+  rm -rf "$stage_dir"
+  mkdir -p "$stage_dir"
+  cp -R "$arch_app_dir" "$stage_dir/$(basename "$arch_app_dir")"
+  ln -s /Applications "$stage_dir/Applications"
+
+  if command -v create-dmg >/dev/null 2>&1; then
+    echo "[dmg] Using create-dmg"
+    if (cd "$stage_dir" && create-dmg \
+      --volname "$APP_NAME" \
+      --window-pos 200 120 \
+      --window-size 600 400 \
+      --icon-size 100 \
+      --icon "$(basename "$arch_app_dir")" 175 120 \
+      --hide-extension "$(basename "$arch_app_dir")" \
+      --app-drop-link 425 120 \
+      "$dmg_path" \
+      "$(basename "$arch_app_dir")"); then
+      :
     else
-      echo "[WARN][$ARCH] Entitlements file missing at $ENT_FILE; skipping post re-sign"
+      echo "[warn] create-dmg failed; falling back to hdiutil"
+      hdiutil create -volname "$APP_NAME" -srcfolder "$stage_dir" -ov -format UDZO -imagekey zlib-level=9 "$dmg_path"
     fi
   else
-    # For Direct builds (SANDBOX=off), ensure hardened runtime is applied
-    echo "[post][$ARCH] Re-signing app with hardened runtime (no entitlements)"
-    codesign --force --options runtime \
-      --sign "${SIGNING_CERT}" \
-      "$APP_PATH"
+    echo "[dmg] Using hdiutil"
+    hdiutil create -volname "$APP_NAME" -srcfolder "$stage_dir" -ov -format UDZO -imagekey zlib-level=9 "$dmg_path"
   fi
 
-  echo "[verify][$ARCH] entitlements (after post-sign)"
-  codesign -d --entitlements :- "$APP_PATH" 2>/dev/null || true
+  rm -rf "$stage_dir"
 
-  echo "[verify][$ARCH] codesign (deep, strict)"
-  codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-
-  # Verify requested architecture exists in main executable
-  MAIN_EXEC=$(defaults read "$APP_PATH/Contents/Info" CFBundleExecutable 2>/dev/null || true)
-  if [[ -n "$MAIN_EXEC" && -f "$APP_PATH/Contents/MacOS/$MAIN_EXEC" ]]; then
-    LIPO_INFO=$(lipo -info "$APP_PATH/Contents/MacOS/$MAIN_EXEC" 2>/dev/null || true)
-    echo "[verify][$ARCH] lipo: $LIPO_INFO"
-    if [[ "$LIPO_INFO" != *"$ARCH"* ]]; then
-      echo "[ERROR][$ARCH] Expected $ARCH slice in main executable, got: $LIPO_INFO" >&2
-      exit 1
-    fi
+  if [[ ! -f "$dmg_path" ]]; then
+    echo "[error] DMG not created: $dmg_path" >&2
+    exit 1
   fi
 
-  echo "[info][$ARCH] Extracting version from Info.plist"
-  APP_BUNDLE_ID=$(defaults read "$APP_PATH/Contents/Info" CFBundleIdentifier 2>/dev/null || true)
-  APP_VERSION=$(defaults read "$APP_PATH/Contents/Info" CFBundleShortVersionString 2>/dev/null || true)
-  APP_VERSION=${APP_VERSION:-$BASE_VERSION}
+  local notarized=0
+  case "$NOTARY_MODE" in
+    profile)
+      echo "[notary] Submitting with profile ${APPLE_NOTARY_PROFILE:-}"
+      notarized=1
+      xcrun notarytool submit "$dmg_path" --keychain-profile "${APPLE_NOTARY_PROFILE:-}" --wait
+      xcrun stapler staple "$dmg_path" || true
+      xcrun stapler staple "$arch_app_dir" || true
+      ;;
+    apple)
+      echo "[notary] Submitting with Apple ID"
+      notarized=1
+      xcrun notarytool submit "$dmg_path" \
+        --apple-id "${APPLE_ID:-}" \
+        --team-id "$TEAM_ID" \
+        --password "${APPLE_PASSWORD:-}" \
+        --wait
+      xcrun stapler staple "$dmg_path" || true
+      xcrun stapler staple "$arch_app_dir" || true
+      ;;
+    *)
+      echo "[notary] Skipping notarization (credentials not provided)"
+      ;;
+  esac
 
-  # Sanity: ensure PrivacyInfo.xcprivacy is embedded for MAS readiness
-  if [[ ! -f "$APP_PATH/Contents/Resources/PrivacyInfo.xcprivacy" ]]; then
-    echo "[WARN][$ARCH] PrivacyInfo.xcprivacy not found in app Resources. Ensure it's added to Copy Bundle Resources."
+  if [[ "$notarized" == "1" ]]; then
+    echo "[verify] Validating notarization"
+    xcrun stapler validate "$dmg_path"
+    xcrun stapler validate "$arch_app_dir"
   fi
 
-  PRODUCT_NAME=$(basename "$APP_PATH" .app)
-  # Output naming for GitHub Releases "latest/download" links
-  # We intentionally use fixed filenames so the website can link to stable paths:
-  #   - codmate-arm64.dmg
-  #   - codmate-x86_64.dmg
-  # If you need the old versioned naming, set RELEASE_NAMING=versioned when invoking this script.
-  if [[ "${RELEASE_NAMING:-fixed}" == "versioned" ]]; then
-    DMG_NAME="$PRODUCT_NAME-$APP_VERSION+${BUILD_NUMBER}-$ARCH.dmg"
-  else
-    case "$ARCH" in
-      arm64)   DMG_NAME="codmate-arm64.dmg" ;;
-      x86_64)  DMG_NAME="codmate-x86_64.dmg" ;;
-      *)       DMG_NAME="$PRODUCT_NAME-$ARCH.dmg" ;;
-    esac
-  fi
-  DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
-
-make_dmg_with_hdiutil() {
-  local src_app="$1"; local dmg_path="$2"; local vol_name="$3"
-  local tmp_dmg="$BUILD_DIR/tmp.dmg"
-  local mnt_dir="$BUILD_DIR/mnt"
-
-  echo "[4/7] Creating DMG via hdiutil"
-  rm -f "$tmp_dmg" "$dmg_path"
-  hdiutil create -size 300m -fs HFS+ -volname "$vol_name" "$tmp_dmg"
-  mkdir -p "$mnt_dir"
-  hdiutil attach "$tmp_dmg" -mountpoint "$mnt_dir" -nobrowse -quiet
-  mkdir -p "$mnt_dir/.background" || true
-  cp -R "$src_app" "$mnt_dir/"
-  ln -s /Applications "$mnt_dir/Applications"
-  sync
-  hdiutil detach "$mnt_dir" -quiet
-  hdiutil convert "$tmp_dmg" -format UDZO -imagekey zlib-level=9 -o "$dmg_path" >/dev/null
-  rm -f "$tmp_dmg"
+  echo "[ok] DMG ready: $dmg_path"
 }
 
-if command -v create-dmg >/dev/null 2>&1; then
-  echo "[4/7][$ARCH] Creating DMG via create-dmg"
-  rm -f "$DMG_PATH"
-  create-dmg \
-    --volname "$PRODUCT_NAME" \
-    --window-pos 200 120 \
-    --window-size 600 400 \
-    --icon-size 96 \
-    --hide-extension "$PRODUCT_NAME.app" \
-    --app-drop-link 425 200 \
-    "$DMG_PATH" \
-    "$APP_PATH"
+if [[ ${#ARCH_MATRIX[@]} -eq 1 ]]; then
+  build_dmg_for_arch "${ARCH_MATRIX[0]}"
 else
-  make_dmg_with_hdiutil "$APP_PATH" "$DMG_PATH" "$PRODUCT_NAME"
+  for arch in "${ARCH_MATRIX[@]}"; do
+    build_dmg_for_arch "$arch"
+  done
 fi
-
-echo "[5/7][$ARCH] Notarizing DMG"
-if [[ -n "${APPLE_NOTARY_PROFILE:-}" ]]; then
-  xcrun notarytool submit "$DMG_PATH" \
-    --keychain-profile "$APPLE_NOTARY_PROFILE" \
-    --wait
-elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${TEAM_ID:-}" ]]; then
-  xcrun notarytool submit "$DMG_PATH" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_PASSWORD" \
-    --team-id "$TEAM_ID" \
-    --wait
-else
-  echo "[WARN][$ARCH] Notarization credentials not provided. Skipping notarization."
-  echo "       Provide APPLE_NOTARY_PROFILE or APPLE_ID/APPLE_PASSWORD/TEAM_ID to notarize."
-fi
-
-echo "[6/7][$ARCH] Stapling tickets (DMG and app)"
-if xcrun stapler staple -v "$DMG_PATH"; then
-  echo "[staple][$ARCH] DMG stapled"
-else
-  echo "[WARN][$ARCH] DMG staple skipped or failed"
-fi
-if xcrun stapler staple -v "$APP_PATH"; then
-  echo "[staple][$ARCH] App stapled"
-else
-  echo "[WARN][$ARCH] App staple skipped or failed"
-fi
-
-echo "[7/7][$ARCH] Verifying Gatekeeper assessment"
-spctl -a -t open --context context:primary-signature -vv "$APP_PATH" || true
-spctl -a -t open --context context:primary-signature -vv "$DMG_PATH" || true
-
-echo ""
-echo "Done [$ARCH]. DMG: $DMG_PATH"
-echo "Bundle ID: ${APP_BUNDLE_ID:-unknown}, Version: $APP_VERSION (build $BUILD_NUMBER)"
-done

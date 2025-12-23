@@ -5,7 +5,7 @@ Purpose
 - Scope: applies to the entire repo. Prefer macOS SwiftUI/AppKit APIs; avoid iOS‑only placements or components.
 
 Architecture
-- App type: macOS SwiftUI app (min macOS 13.5). SwiftPM for sources + hand‑crafted Xcode project `CodMate.xcodeproj` for running/debugging.
+- App type: macOS SwiftUI app (min macOS 13.5). SwiftPM-only build (no Xcode project).
 - Layering (MVVM):
   - Models: pure data structures (SessionSummary, SessionEvent, DateDimension, SessionLoadScope, …)
   - Services: IO and side effects (SessionIndexer, SessionCacheStore, SessionActions, SessionTimelineLoader, LLMClient)
@@ -117,13 +117,18 @@ Diagnostics
 - Users can “Save Report…” to export a JSON diagnostics file for troubleshooting.
 
 File/Folder Layout
-- Sources/CodMate/
-  - Models/  – data types
-- Services/ – IO, indexing, cache, codex actions
-  - ViewModels/ – observable state
-  - Views/ – SwiftUI views only
-- CodMate/Info.plist – bundled via build settings; do NOT add to Copy Bundle Resources.
-- CodMate.xcodeproj – single app target “CodMate”.
+- assets/             – Assets + Info.plist
+- CodMateApp.swift    – App entry point
+- models/             – data types
+- services/           – IO, indexing, cache, codex actions
+- utils/              – helpers
+- views/              – SwiftUI views only
+- payload/            – bundled presets (providers/terminals)
+- notify/             – Swift command-line helper (codmate-notify)
+- SwiftTerm/          – embedded terminal dependency (local package)
+- .github/workflows/  – CI + release pipelines
+- scripts/            – build/packaging scripts
+- docs/               – design notes and investigation docs
 
 Advanced Page
 - Settings › Advanced (between MCP Server and About) uses a TabView with Path and Dialectics tabs.
@@ -137,10 +142,9 @@ Advanced Page
   - Does not mutate config automatically; changes only happen via explicit user actions
 
 Build & Run
-- Prefer Xcode-based builds over `swift build`; do not use `swift build` for validating this app.
-- Standard local debug build command from the repo root:  
-  `xcodebuild -project CodMate.xcodeproj -scheme CodMate -configuration Debug -derivedDataPath .build -destination 'platform=macOS' build`
-- When validating changes, run the above command (or the equivalent Xcode GUI build) to ensure the app compiles.
+- SwiftPM is the source of truth. Use `swift build` to validate compile.
+- Build the app bundle with `make app` or `BASE_VERSION=1.2.3 ./scripts/create-app-bundle.sh`.
+- Build a DMG with `make dmg` or `BASE_VERSION=1.2.3 ./scripts/macos-build-notarized-dmg.sh`.
 
 Commit Conventions
 
@@ -195,7 +199,6 @@ PR / Change Policy for Agents
 
 Known Pitfalls
 - `.searchable` may hijack the trailing toolbar slot on macOS; use `SearchField` in a `ToolbarItem` to control placement.
-- Don’t put Info.plist in Copy Bundle Resources (Xcode will warn and refuse to build).
 - OutlineGroup row height is affected by control size and insets; tighten with `.environment(\.defaultMinListRowHeight, 18)` and `.listRowInsets(...)` inside the row content.
 - Swift KeyPath escaping when patching: do not double-escape the leading backslash in typed key paths. Always write single-backslash literals like `\ProvidersVM.codexBaseURL` in Swift sources. The apply_patch tool takes plain text; extra escaping (e.g., `\\ProvidersVM...`) will compile-fail and break symbol discovery across files.
 - Prefer dot-shorthand KeyPaths in Swift (clearer, avoids escaping pitfalls): use `\.codexBaseURL` instead of `\ProvidersVM.codexBaseURL` when the generic context already constrains the base type (e.g., `ReferenceWritableKeyPath<ProvidersVM, String>`). This makes patches safer and reduces chances of accidental extra backslashes.
